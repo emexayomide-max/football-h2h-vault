@@ -1,301 +1,647 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 
-const API_BASE_URL = "http://localhost:3001";
+const API_BASE_URL =
+  import.meta.env.VITE_API_URL || "http://localhost:3001";
 
-function safeText(value, fallback = "") {
-  if (value === null || value === undefined) {
-    return fallback;
+function formatDate(date) {
+  if (!date) return "Unknown date";
+
+  const parsed = new Date(date);
+
+  if (Number.isNaN(parsed.getTime())) {
+    return date;
   }
 
-  if (typeof value === "string") {
-    return value;
-  }
-
-  if (
-    typeof value === "number" ||
-    typeof value === "boolean"
-  ) {
-    return String(value);
-  }
-
-  if (typeof value === "object") {
-    if (value.name) {
-      return String(value.name);
-    }
-
-    if (value.short_name) {
-      return String(value.short_name);
-    }
-
-    if (value.slug) {
-      return String(value.slug);
-    }
-
-    if (value.team1 && value.team2) {
-      const team1Name = safeText(value.team1);
-      const team2Name = safeText(value.team2);
-
-      if (team1Name || team2Name) {
-        return `${team1Name} vs ${team2Name}`;
-      }
-    }
-
-    try {
-      return JSON.stringify(value);
-    } catch {
-      return fallback;
-    }
-  }
-
-  return fallback;
-}
-
-function getTeamName(team, fallback = "Team") {
-  const name = safeText(team, "");
-
-  return name || fallback;
-}
-
-function formatDate(dateString) {
-  if (!dateString) {
-    return "Unknown date";
-  }
-
-  const date = new Date(dateString);
-
-  if (Number.isNaN(date.getTime())) {
-    return "Unknown date";
-  }
-
-  return date.toLocaleDateString(undefined, {
-    year: "numeric",
+  return parsed.toLocaleDateString("en-GB", {
+    day: "2-digit",
     month: "short",
-    day: "numeric",
+    year: "numeric",
   });
 }
 
-function getNumber(value, fallback = 0) {
-  if (
-    typeof value === "number" &&
-    Number.isFinite(value)
-  ) {
-    return value;
-  }
-
-  if (
-    typeof value === "string" &&
-    value.trim() !== ""
-  ) {
-    const number = Number(value);
-
-    if (Number.isFinite(number)) {
-      return number;
-    }
-  }
-
-  return fallback;
+function formatPercentage(value) {
+  return `${Number(value || 0).toFixed(1)}%`;
 }
 
-function FormBadge({ result }) {
-  const normalizedResult = safeText(result).toUpperCase();
+/*
+ * Convert the backend match shape into the shape
+ * expected by the existing UI.
+ *
+ * Backend:
+ *   home_score
+ *   away_score
+ *   home_team_id
+ *   away_team_id
+ *   home_team_name
+ *   away_team_name
+ *   match_date
+ *
+ * Frontend:
+ *   score.home
+ *   score.away
+ *   homeTeam.id
+ *   homeTeam.name
+ *   awayTeam.id
+ *   awayTeam.name
+ *   date
+ */
+function normalizeMatch(match) {
+  return {
+    ...match,
 
-  const styles = {
-    W: "bg-lime-400 text-slate-950",
-    D: "bg-slate-600 text-white",
-    L: "bg-red-500 text-white",
+    date: match.match_date,
+
+    score: {
+      home: Number(match.home_score ?? 0),
+      away: Number(match.away_score ?? 0),
+    },
+
+    homeTeam: {
+      id: match.home_team_id,
+      name: match.home_team_name,
+      slug: match.home_team_slug,
+    },
+
+    awayTeam: {
+      id: match.away_team_id,
+      name: match.away_team_name,
+      slug: match.away_team_slug,
+    },
+
+    competition: {
+      id: match.competition_id,
+      name: match.competition_name,
+    },
+
+    season: {
+      id: match.season_id,
+      name: match.season_name,
+    },
+  };
+}
+
+/*
+ * Convert the backend summary into the shape
+ * expected by the UI.
+ */
+function normalizeSummary(summary) {
+  const totalMatches = Number(summary.totalMatches || 0);
+
+  const team1Wins = Number(summary.team1Wins || 0);
+  const team2Wins = Number(summary.team2Wins || 0);
+  const draws = Number(summary.draws || 0);
+
+  const team1Goals = Number(summary.team1Goals || 0);
+  const team2Goals = Number(summary.team2Goals || 0);
+
+  const btts = Number(summary.btts || 0);
+
+  const over05 = Number(summary.over05 || 0);
+  const over15 = Number(summary.over15 || 0);
+  const over25 = Number(summary.over25 || 0);
+  const over35 = Number(summary.over35 || 0);
+  const over45 = Number(summary.over45 || 0);
+
+  const team1CleanSheets = Number(
+    summary.team1CleanSheets || 0
+  );
+
+  const team2CleanSheets = Number(
+    summary.team2CleanSheets || 0
+  );
+
+  return {
+    ...summary,
+
+    totalMatches,
+
+    team1Wins,
+    team2Wins,
+    draws,
+
+    team1WinPercentage:
+      totalMatches > 0
+        ? (team1Wins / totalMatches) * 100
+        : 0,
+
+    team2WinPercentage:
+      totalMatches > 0
+        ? (team2Wins / totalMatches) * 100
+        : 0,
+
+    drawPercentage:
+      totalMatches > 0
+        ? (draws / totalMatches) * 100
+        : 0,
+
+    team1Goals,
+    team2Goals,
+
+    totalGoals: team1Goals + team2Goals,
+
+    goalDifference:
+      team1Goals - team2Goals,
+
+    averageGoals:
+      totalMatches > 0
+        ? (team1Goals + team2Goals) /
+          totalMatches
+        : 0,
+
+    btts: {
+      count: btts,
+      percentage:
+        totalMatches > 0
+          ? (btts / totalMatches) * 100
+          : 0,
+    },
+
+    over05: {
+      count: over05,
+      percentage:
+        totalMatches > 0
+          ? (over05 / totalMatches) * 100
+          : 0,
+    },
+
+    over15: {
+      count: over15,
+      percentage:
+        totalMatches > 0
+          ? (over15 / totalMatches) * 100
+          : 0,
+    },
+
+    over25: {
+      count: over25,
+      percentage:
+        totalMatches > 0
+          ? (over25 / totalMatches) * 100
+          : 0,
+    },
+
+    over35: {
+      count: over35,
+      percentage:
+        totalMatches > 0
+          ? (over35 / totalMatches) * 100
+          : 0,
+    },
+
+    over45: {
+      count: over45,
+      percentage:
+        totalMatches > 0
+          ? (over45 / totalMatches) * 100
+          : 0,
+    },
+
+    cleanSheets: {
+      team1: team1CleanSheets,
+      team2: team2CleanSheets,
+    },
+  };
+}
+
+/*
+ * Convert the backend home/away response into
+ * arrays of normalized matches.
+ */
+function normalizeHomeAway(data) {
+  if (!data?.breakdown) {
+    return {
+      team1Home: [],
+      team2Home: [],
+      team1Away: [],
+      team2Away: [],
+    };
+  }
+
+  return {
+    team1Home: Array.isArray(
+      data.breakdown.team1?.home?.matches
+    )
+      ? data.breakdown.team1.home.matches.map(
+          normalizeMatch
+        )
+      : [],
+
+    team2Home: Array.isArray(
+      data.breakdown.team2?.home?.matches
+    )
+      ? data.breakdown.team2.home.matches.map(
+          normalizeMatch
+        )
+      : [],
+
+    team1Away: Array.isArray(
+      data.breakdown.team1?.away?.matches
+    )
+      ? data.breakdown.team1.away.matches.map(
+          normalizeMatch
+        )
+      : [],
+
+    team2Away: Array.isArray(
+      data.breakdown.team2?.away?.matches
+    )
+      ? data.breakdown.team2.away.matches.map(
+          normalizeMatch
+        )
+      : [],
+  };
+}
+
+function getResult(match, teamId) {
+  const homeScore = Number(
+    match.score?.home ?? 0
+  );
+
+  const awayScore = Number(
+    match.score?.away ?? 0
+  );
+
+  const isHome =
+    Number(match.homeTeam?.id) === Number(teamId);
+
+  const teamScore = isHome
+    ? homeScore
+    : awayScore;
+
+  const opponentScore = isHome
+    ? awayScore
+    : homeScore;
+
+  if (teamScore > opponentScore) return "W";
+  if (teamScore < opponentScore) return "L";
+
+  return "D";
+}
+
+function ResultBadge({ result }) {
+  const classes = {
+    W: "bg-[#B7F34A]/15 text-[#B7F34A] border-[#B7F34A]/20",
+    D: "bg-white/5 text-[#8B95A7] border-white/10",
+    L: "bg-red-500/10 text-red-400 border-red-500/20",
   };
 
   return (
     <span
-      className={`flex h-8 w-8 items-center justify-center rounded-full text-xs font-black ${
-        styles[normalizedResult] ||
-        "bg-slate-700 text-white"
+      className={`inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border text-xs font-bold ${
+        classes[result] || classes.D
       }`}
     >
-      {normalizedResult || "-"}
+      {result}
     </span>
-  );
-}
-
-function FormCard({
-  team,
-  form,
-  matches,
-  loading,
-}) {
-  const teamName = getTeamName(team);
-
-  return (
-    <div className="rounded-2xl border border-white/10 bg-[#111722] p-5">
-      <div className="mb-5 flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
-        <div>
-          <p className="text-xs font-semibold uppercase tracking-[0.2em] text-slate-500">
-            Recent Form
-          </p>
-
-          <h3 className="mt-1 text-xl font-bold text-white">
-            {teamName}
-          </h3>
-        </div>
-
-        <div className="flex gap-2">
-          {Array.isArray(form) &&
-          form.length > 0 ? (
-            form.map((result, index) => (
-              <FormBadge
-                key={`${safeText(result)}-${index}`}
-                result={result}
-              />
-            ))
-          ) : (
-            <span className="text-sm text-slate-500">
-              No form data
-            </span>
-          )}
-        </div>
-      </div>
-
-      {loading ? (
-        <p className="text-sm text-slate-500">
-          Loading recent matches...
-        </p>
-      ) : Array.isArray(matches) &&
-        matches.length > 0 ? (
-        <div className="space-y-3">
-          {matches.map((match, index) => {
-            const opponent = safeText(
-              match?.opponent,
-              "Unknown opponent"
-            );
-
-            const teamScore = safeText(
-              match?.team_score,
-              "-"
-            );
-
-            const opponentScore = safeText(
-              match?.opponent_score,
-              "-"
-            );
-
-            const venue = safeText(
-              match?.venue,
-              ""
-            );
-
-            return (
-              <div
-                key={
-                  match?.id ??
-                  `${opponent}-${index}`
-                }
-                className="flex items-center justify-between rounded-xl border border-white/5 bg-[#0b1018] px-4 py-3"
-              >
-                <div className="min-w-0">
-                  <p className="truncate text-sm font-semibold text-white">
-                    {opponent}
-                  </p>
-
-                  <p className="mt-1 text-xs text-slate-500">
-                    {formatDate(
-                      match?.match_date
-                    )}
-
-                    {venue
-                      ? ` · ${venue}`
-                      : ""}
-                  </p>
-                </div>
-
-                <div className="ml-4 flex items-center gap-3">
-                  <span className="text-sm font-bold text-white">
-                    {teamScore} -{" "}
-                    {opponentScore}
-                  </span>
-
-                  <FormBadge
-                    result={match?.result}
-                  />
-                </div>
-              </div>
-            );
-          })}
-        </div>
-      ) : (
-        <p className="text-sm text-slate-500">
-          No recent finished matches found.
-        </p>
-      )}
-    </div>
   );
 }
 
 function StatCard({
   label,
   value,
-  description,
+  subtext,
+  accent = false,
 }) {
   return (
-    <div className="rounded-2xl border border-white/10 bg-[#111722] p-5">
-      <p className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-500">
-        {safeText(label)}
+    <div className="min-w-0 rounded-2xl border border-white/10 bg-[#111722] p-4 sm:p-5">
+      <p className="break-words text-[10px] font-semibold uppercase tracking-wider text-[#596274] sm:text-xs">
+        {label}
       </p>
 
-      <p className="mt-3 text-3xl font-black tracking-tight text-white">
-        {safeText(value, "0")}
+      <p
+        className={`mt-2 break-words text-xl font-bold sm:mt-3 sm:text-2xl ${
+          accent
+            ? "text-[#B7F34A]"
+            : "text-[#F5F7FA]"
+        }`}
+      >
+        {value}
       </p>
 
-      {description && (
-        <p className="mt-1 text-xs text-slate-500">
-          {safeText(description)}
+      {subtext && (
+        <p className="mt-1 break-words text-[11px] text-[#8B95A7] sm:text-xs">
+          {subtext}
         </p>
       )}
     </div>
   );
 }
 
-function GoalStat({
+function PercentageBar({
   label,
-  value,
+  percentage,
+  count,
   total,
 }) {
-  const numericValue = getNumber(value);
-  const numericTotal = getNumber(total);
-
-  const percentage =
-    numericTotal > 0
-      ? Math.round(
-          (numericValue / numericTotal) * 100
-        )
-      : 0;
+  const safePercentage = Math.max(
+    0,
+    Math.min(100, Number(percentage || 0))
+  );
 
   return (
-    <div className="rounded-2xl border border-white/10 bg-[#111722] p-5">
-      <div className="flex items-end justify-between gap-4">
-        <div>
-          <p className="text-sm font-semibold text-white">
-            {safeText(label)}
+    <div>
+      <div className="mb-2 flex items-center justify-between gap-3">
+        <span className="min-w-0 text-xs text-[#F5F7FA] sm:text-sm">
+          {label}
+        </span>
+
+        <span className="shrink-0 text-xs font-semibold text-[#B7F34A] sm:text-sm">
+          {formatPercentage(safePercentage)}
+        </span>
+      </div>
+
+      <div className="h-2 overflow-hidden rounded-full bg-white/5">
+        <div
+          className="h-full rounded-full bg-[#B7F34A] transition-all"
+          style={{
+            width: `${safePercentage}%`,
+          }}
+        />
+      </div>
+
+      <p className="mt-1 text-[10px] text-[#596274] sm:text-xs">
+        {count || 0} of {total || 0} matches
+      </p>
+    </div>
+  );
+}
+
+function Section({
+  title,
+  description,
+  children,
+}) {
+  return (
+    <section className="min-w-0 rounded-2xl border border-white/10 bg-[#111722] p-4 sm:p-6">
+      <div className="mb-5 sm:mb-6">
+        <h2 className="text-base font-bold text-[#F5F7FA] sm:text-lg">
+          {title}
+        </h2>
+
+        {description && (
+          <p className="mt-1 text-xs leading-5 text-[#8B95A7] sm:text-sm sm:leading-6">
+            {description}
+          </p>
+        )}
+      </div>
+
+      {children}
+    </section>
+  );
+}
+
+function TeamHeader({ team, side }) {
+  return (
+    <div
+      className={`flex min-w-0 items-center gap-3 sm:gap-4 ${
+        side === "right"
+          ? "flex-row-reverse text-right"
+          : ""
+      }`}
+    >
+      <div className="flex h-14 w-14 shrink-0 items-center justify-center overflow-hidden rounded-2xl border border-white/10 bg-[#080B12] sm:h-16 sm:w-16">
+        {team?.logo_url ? (
+          <img
+            src={team.logo_url}
+            alt={team.name}
+            className="h-10 w-10 object-contain sm:h-12 sm:w-12"
+          />
+        ) : (
+          <span className="text-lg font-bold text-[#B7F34A] sm:text-xl">
+            {team?.name?.charAt(0) || "?"}
+          </span>
+        )}
+      </div>
+
+      <div className="min-w-0">
+        <p className="text-[10px] font-semibold uppercase tracking-wider text-[#596274] sm:text-xs">
+          {side === "right" ? "Team 2" : "Team 1"}
+        </p>
+
+        <h1 className="mt-1 break-words text-base font-bold text-[#F5F7FA] sm:text-2xl">
+          {team?.name || "Unknown team"}
+        </h1>
+
+        {team?.short_name && (
+          <p className="mt-1 text-xs text-[#8B95A7] sm:text-sm">
+            {team.short_name}
+          </p>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function FormCard({ team, matches }) {
+  const form = matches
+    .slice(0, 5)
+    .map((match) => ({
+      match,
+      result: getResult(match, team.id),
+    }));
+
+  const wins = form.filter(
+    (item) => item.result === "W"
+  ).length;
+
+  const draws = form.filter(
+    (item) => item.result === "D"
+  ).length;
+
+  const losses = form.filter(
+    (item) => item.result === "L"
+  ).length;
+
+  return (
+    <div className="min-w-0 rounded-2xl border border-white/10 bg-[#111722] p-4 sm:p-5">
+      <div className="flex min-w-0 items-center gap-3">
+        <div className="flex h-10 w-10 shrink-0 items-center justify-center overflow-hidden rounded-xl bg-[#080B12]">
+          {team?.logo_url ? (
+            <img
+              src={team.logo_url}
+              alt={team.name}
+              className="h-7 w-7 object-contain"
+            />
+          ) : (
+            <span className="font-bold text-[#B7F34A]">
+              {team?.name?.charAt(0) || "?"}
+            </span>
+          )}
+        </div>
+
+        <div className="min-w-0">
+          <h3 className="truncate font-semibold text-[#F5F7FA]">
+            {team?.name}
+          </h3>
+
+          <p className="text-[11px] text-[#596274] sm:text-xs">
+            Last {form.length} H2H meetings
+          </p>
+        </div>
+      </div>
+
+      <div className="mt-5 flex flex-wrap items-center gap-2">
+        {form.length > 0 ? (
+          form.map((item) => (
+            <ResultBadge
+              key={item.match.id}
+              result={item.result}
+            />
+          ))
+        ) : (
+          <p className="text-sm text-[#596274]">
+            No recent meetings
+          </p>
+        )}
+      </div>
+
+      <div className="mt-5 grid grid-cols-3 gap-2">
+        <div className="rounded-xl bg-[#080B12] p-2.5 text-center sm:p-3">
+          <p className="text-base font-bold text-[#B7F34A] sm:text-lg">
+            {wins}
           </p>
 
-          <p className="mt-1 text-xs text-slate-500">
-            {numericValue} of{" "}
-            {numericTotal} meetings
+          <p className="text-[9px] uppercase text-[#596274] sm:text-[10px]">
+            Wins
           </p>
         </div>
 
-        <p className="text-2xl font-black text-lime-400">
-          {percentage}%
-        </p>
+        <div className="rounded-xl bg-[#080B12] p-2.5 text-center sm:p-3">
+          <p className="text-base font-bold text-[#8B95A7] sm:text-lg">
+            {draws}
+          </p>
+
+          <p className="text-[9px] uppercase text-[#596274] sm:text-[10px]">
+            Draws
+          </p>
+        </div>
+
+        <div className="rounded-xl bg-[#080B12] p-2.5 text-center sm:p-3">
+          <p className="text-base font-bold text-red-400 sm:text-lg">
+            {losses}
+          </p>
+
+          <p className="text-[9px] uppercase text-[#596274] sm:text-[10px]">
+            Losses
+          </p>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function MeetingRow({ match, team1, team2 }) {
+  const homeScore = Number(
+    match.score?.home ?? 0
+  );
+
+  const awayScore = Number(
+    match.score?.away ?? 0
+  );
+
+  return (
+    <div className="border-b border-white/5 py-4 last:border-b-0">
+      {/* Mobile */}
+      <div className="flex flex-col gap-3 sm:hidden">
+        <div className="flex items-center justify-between gap-3">
+          <div className="min-w-0 flex-1 text-right">
+            <p className="break-words text-xs font-semibold text-[#F5F7FA]">
+              {match.homeTeam?.name ||
+                team1?.name}
+            </p>
+
+            <p className="mt-1 text-[10px] text-[#596274]">
+              Home
+            </p>
+          </div>
+
+          <div className="shrink-0">
+            <div className="inline-flex items-center gap-2 rounded-xl border border-white/10 bg-[#080B12] px-3 py-2">
+              <span className="text-base font-bold text-[#F5F7FA]">
+                {homeScore}
+              </span>
+
+              <span className="text-xs text-[#596274]">
+                -
+              </span>
+
+              <span className="text-base font-bold text-[#F5F7FA]">
+                {awayScore}
+              </span>
+            </div>
+          </div>
+
+          <div className="min-w-0 flex-1">
+            <p className="break-words text-xs font-semibold text-[#F5F7FA]">
+              {match.awayTeam?.name ||
+                team2?.name}
+            </p>
+
+            <p className="mt-1 text-[10px] text-[#596274]">
+              Away
+            </p>
+          </div>
+        </div>
+
+        <div className="flex flex-wrap items-center justify-center gap-2 text-[10px] text-[#596274]">
+          <span>{formatDate(match.date)}</span>
+
+          {match.competition?.name && (
+            <>
+              <span>•</span>
+
+              <span className="break-words">
+                {match.competition.name}
+              </span>
+            </>
+          )}
+        </div>
       </div>
 
-      <div className="mt-4 h-2 overflow-hidden rounded-full bg-slate-800">
-        <div
-          className="h-full rounded-full bg-lime-400 transition-all"
-          style={{
-            width: `${percentage}%`,
-          }}
-        />
+      {/* Desktop */}
+      <div className="hidden grid-cols-[1fr_auto_1fr] items-center gap-3 sm:grid">
+        <div className="min-w-0 text-right">
+          <p className="truncate text-sm font-semibold text-[#F5F7FA]">
+            {match.homeTeam?.name ||
+              team1?.name}
+          </p>
+
+          <p className="mt-1 text-xs text-[#596274]">
+            Home
+          </p>
+        </div>
+
+        <div className="text-center">
+          <div className="inline-flex items-center gap-2 rounded-xl border border-white/10 bg-[#080B12] px-4 py-2">
+            <span className="text-lg font-bold text-[#F5F7FA]">
+              {homeScore}
+            </span>
+
+            <span className="text-xs text-[#596274]">
+              -
+            </span>
+
+            <span className="text-lg font-bold text-[#F5F7FA]">
+              {awayScore}
+            </span>
+          </div>
+
+          <p className="mt-2 text-[10px] text-[#596274]">
+            {formatDate(match.date)}
+          </p>
+        </div>
+
+        <div className="min-w-0">
+          <p className="truncate text-sm font-semibold text-[#F5F7FA]">
+            {match.awayTeam?.name ||
+              team2?.name}
+          </p>
+
+          <p className="mt-1 text-xs text-[#596274]">
+            Away
+          </p>
+        </div>
       </div>
     </div>
   );
@@ -303,122 +649,61 @@ function GoalStat({
 
 function HomeAwayCard({
   title,
-  subtitle,
-  data,
-  homeTeam,
-  opponentTeam,
-  homeTeamKey,
-  opponentTeamKey,
+  matches,
+  team,
 }) {
-  if (!data || typeof data !== "object") {
-    return (
-      <div className="rounded-2xl border border-white/10 bg-[#111722] p-5">
-        <p className="text-sm text-slate-500">
-          No home/away data available.
-        </p>
-      </div>
-    );
-  }
+  let wins = 0;
+  let draws = 0;
+  let losses = 0;
 
-  const meetings = getNumber(
-    data.meetings
-  );
+  matches.forEach((match) => {
+    const result = getResult(match, team.id);
 
-  const draws = getNumber(
-    data.draws
-  );
-
-  const cleanSheets = getNumber(
-    data.cleanSheets
-  );
-
-  const average = getNumber(
-    data.average
-  );
-
-  const homeWins = getNumber(
-    data[homeTeamKey]
-  );
-
-  const opponentWins = getNumber(
-    data[opponentTeamKey]
-  );
-
-  const homeGoals = getNumber(
-    data.goals?.[homeTeamKey]
-  );
-
-  const opponentGoals = getNumber(
-    data.goals?.[opponentTeamKey]
-  );
+    if (result === "W") wins++;
+    if (result === "D") draws++;
+    if (result === "L") losses++;
+  });
 
   return (
-    <div className="rounded-2xl border border-white/10 bg-[#111722] p-6">
-      <div className="mb-6">
-        <p className="text-xs font-semibold uppercase tracking-[0.2em] text-lime-400">
-          {safeText(subtitle)}
-        </p>
+    <div className="min-w-0 rounded-2xl border border-white/10 bg-[#080B12] p-4 sm:p-5">
+      <h3 className="break-words font-semibold text-[#F5F7FA]">
+        {title}
+      </h3>
 
-        <h3 className="mt-2 text-2xl font-black text-white">
-          {safeText(title)}
-        </h3>
-      </div>
+      <p className="mt-1 text-xs text-[#596274]">
+        {matches.length} meetings
+      </p>
 
-      <div className="grid grid-cols-2 gap-3">
-        <StatCard
-          label="Meetings"
-          value={meetings}
-        />
+      <div className="mt-5 grid grid-cols-3 gap-2">
+        <div className="rounded-xl bg-[#111722] p-2.5 text-center sm:p-3">
+          <p className="text-base font-bold text-[#B7F34A] sm:text-lg">
+            {wins}
+          </p>
 
-        <StatCard
-          label="Average Goals"
-          value={average.toFixed(2)}
-        />
-
-        <StatCard
-          label={`${safeText(homeTeam)} Wins`}
-          value={homeWins}
-        />
-
-        <StatCard
-          label="Draws"
-          value={draws}
-        />
-
-        <StatCard
-          label={`${safeText(opponentTeam)} Wins`}
-          value={opponentWins}
-        />
-
-        <StatCard
-          label="Clean Sheets"
-          value={cleanSheets}
-        />
-      </div>
-
-      <div className="mt-4 rounded-xl border border-white/5 bg-[#0b1018] p-4">
-        <p className="text-xs font-semibold uppercase tracking-[0.15em] text-slate-500">
-          Goals
-        </p>
-
-        <div className="mt-2 flex items-baseline gap-2">
-          <span className="text-3xl font-black text-white">
-            {homeGoals}
-          </span>
-
-          <span className="text-slate-600">
-            -
-          </span>
-
-          <span className="text-3xl font-black text-white">
-            {opponentGoals}
-          </span>
+          <p className="text-[9px] uppercase text-[#596274] sm:text-[10px]">
+            Wins
+          </p>
         </div>
 
-        <p className="mt-2 text-xs text-slate-500">
-          {safeText(homeTeam)} vs{" "}
-          {safeText(opponentTeam)}
-        </p>
+        <div className="rounded-xl bg-[#111722] p-2.5 text-center sm:p-3">
+          <p className="text-base font-bold text-[#8B95A7] sm:text-lg">
+            {draws}
+          </p>
+
+          <p className="text-[9px] uppercase text-[#596274] sm:text-[10px]">
+            Draws
+          </p>
+        </div>
+
+        <div className="rounded-xl bg-[#111722] p-2.5 text-center sm:p-3">
+          <p className="text-base font-bold text-red-400 sm:text-lg">
+            {losses}
+          </p>
+
+          <p className="text-[9px] uppercase text-[#596274] sm:text-[10px]">
+            Losses
+          </p>
+        </div>
       </div>
     </div>
   );
@@ -427,889 +712,884 @@ function HomeAwayCard({
 export default function H2HPage() {
   const { matchup } = useParams();
 
-  const parts = safeText(matchup).split(
-    "-vs-"
-  );
-
-  const team1Slug = parts[0] || "";
-  const team2Slug = parts[1] || "";
-
-  const [h2h, setH2h] = useState(null);
+  const [data, setData] = useState(null);
   const [homeAway, setHomeAway] =
     useState(null);
-
-  const [team1Form, setTeam1Form] =
-    useState(null);
-
-  const [team2Form, setTeam2Form] =
-    useState(null);
-
-  const [competitions, setCompetitions] =
-    useState([]);
-
-  const [seasons, setSeasons] =
-    useState([]);
-
-  const [selectedCompetition, setSelectedCompetition] =
-    useState("");
-
-  const [selectedSeason, setSelectedSeason] =
-    useState("");
-
-  const [limit, setLimit] = useState(10);
 
   const [loading, setLoading] =
     useState(true);
 
-  const [homeAwayLoading, setHomeAwayLoading] =
-    useState(true);
+  const [error, setError] = useState("");
 
-  const [formLoading, setFormLoading] =
-    useState(true);
-
-  const [error, setError] =
-    useState("");
+  const [showAllMatches, setShowAllMatches] =
+    useState(false);
 
   useEffect(() => {
-    async function fetchFilters() {
+    let cancelled = false;
+
+    async function loadH2H() {
       try {
-        const [
-          competitionResponse,
-          seasonResponse,
-        ] = await Promise.all([
-          fetch(
-            `${API_BASE_URL}/api/competitions`
-          ),
-          fetch(
-            `${API_BASE_URL}/api/seasons`
-          ),
-        ]);
+        setLoading(true);
+        setError("");
 
-        if (competitionResponse.ok) {
-          const competitionData =
-            await competitionResponse.json();
-
-          setCompetitions(
-            Array.isArray(
-              competitionData.competitions
-            )
-              ? competitionData.competitions
-              : []
-          );
-        }
-
-        if (seasonResponse.ok) {
-          const seasonData =
-            await seasonResponse.json();
-
-          setSeasons(
-            Array.isArray(
-              seasonData.seasons
-            )
-              ? seasonData.seasons
-              : []
-          );
-        }
-      } catch (err) {
-        console.error(
-          "Failed to load filters:",
-          err
-        );
-      }
-    }
-
-    fetchFilters();
-  }, []);
-
-  useEffect(() => {
-    async function fetchH2H() {
-      setLoading(true);
-      setError("");
-
-      try {
-        const params =
-          new URLSearchParams();
-
-        params.set(
-          "limit",
-          String(limit)
-        );
-
-        if (selectedCompetition) {
-          params.set(
-            "competition",
-            selectedCompetition
-          );
-        }
-
-        if (selectedSeason) {
-          params.set(
-            "season",
-            selectedSeason
-          );
-        }
-
-        const response = await fetch(
-          `${API_BASE_URL}/api/h2h/${team1Slug}/${team2Slug}?${params.toString()}`
-        );
-
-        const data =
-          await response.json();
-
-        if (!response.ok) {
+        if (
+          !matchup ||
+          !matchup.includes("-vs-")
+        ) {
           throw new Error(
-            safeText(
-              data?.message,
-              "Failed to load H2H data"
-            )
+            "Invalid H2H matchup URL."
           );
         }
 
-        setH2h(data);
-      } catch (err) {
-        console.error(
-          "H2H error:",
-          err
-        );
+        const [team1Slug, team2Slug] =
+          matchup.split("-vs-");
 
-        setError(
-          err.message ||
-            "Failed to load H2H data"
-        );
-      } finally {
-        setLoading(false);
-      }
-    }
-
-    if (team1Slug && team2Slug) {
-      fetchH2H();
-    }
-  }, [
-    team1Slug,
-    team2Slug,
-    limit,
-    selectedCompetition,
-    selectedSeason,
-  ]);
-
-  useEffect(() => {
-    async function fetchHomeAway() {
-      setHomeAwayLoading(true);
-
-      try {
-        const response = await fetch(
-          `${API_BASE_URL}/api/h2h/${team1Slug}/${team2Slug}/home-away`
-        );
-
-        const data =
-          await response.json();
-
-        if (!response.ok) {
+        if (!team1Slug || !team2Slug) {
           throw new Error(
-            safeText(
-              data?.message,
-              "Failed to load home/away H2H data"
-            )
+            "Invalid H2H matchup."
           );
         }
 
-        setHomeAway(data);
-      } catch (err) {
-        console.error(
-          "Home/away H2H error:",
-          err
+        const encodedTeam1 =
+          encodeURIComponent(team1Slug);
+
+        const encodedTeam2 =
+          encodeURIComponent(team2Slug);
+
+        const h2hResponse = await fetch(
+          `${API_BASE_URL}/api/h2h/${encodedTeam1}/${encodedTeam2}?limit=50`
         );
 
-        setHomeAway(null);
+        const h2hJson =
+          await h2hResponse.json();
+
+        if (!h2hResponse.ok) {
+          throw new Error(
+            h2hJson.message ||
+              "Failed to load H2H data."
+          );
+        }
+
+        /*
+         * Adapt the backend response once,
+         * then the rest of the page can continue
+         * using the existing UI data structure.
+         */
+        const normalizedData = {
+          ...h2hJson,
+
+          summary: normalizeSummary(
+            h2hJson.summary || {}
+          ),
+
+          matches: Array.isArray(
+            h2hJson.matches
+          )
+            ? h2hJson.matches.map(
+                normalizeMatch
+              )
+            : [],
+        };
+
+        if (!cancelled) {
+          setData(normalizedData);
+        }
+
+        try {
+          const homeAwayResponse =
+            await fetch(
+              `${API_BASE_URL}/api/h2h/${encodedTeam1}/${encodedTeam2}/home-away`
+            );
+
+          if (homeAwayResponse.ok) {
+            const homeAwayJson =
+              await homeAwayResponse.json();
+
+            const normalizedHomeAway =
+              normalizeHomeAway(
+                homeAwayJson
+              );
+
+            if (!cancelled) {
+              setHomeAway(
+                normalizedHomeAway
+              );
+            }
+          }
+        } catch (homeAwayError) {
+          console.warn(
+            "Home-away data unavailable:",
+            homeAwayError
+          );
+        }
+      } catch (err) {
+        if (!cancelled) {
+          console.error(
+            "H2H loading error:",
+            err
+          );
+
+          setError(
+            err.message ||
+              "Failed to load H2H data."
+          );
+        }
       } finally {
-        setHomeAwayLoading(false);
+        if (!cancelled) {
+          setLoading(false);
+        }
       }
     }
 
-    if (team1Slug && team2Slug) {
-      fetchHomeAway();
-    }
-  }, [
-    team1Slug,
-    team2Slug,
-  ]);
+    loadH2H();
 
-  useEffect(() => {
-    async function fetchForms() {
-      setFormLoading(true);
+    return () => {
+      cancelled = true;
+    };
+  }, [matchup]);
 
-      try {
-        const [
-          team1Response,
-          team2Response,
-        ] = await Promise.all([
-          fetch(
-            `${API_BASE_URL}/api/teams/${team1Slug}/form`
-          ),
-          fetch(
-            `${API_BASE_URL}/api/teams/${team2Slug}/form`
-          ),
-        ]);
+  const team1 = data?.teams?.team1;
+  const team2 = data?.teams?.team2;
 
-        const team1Data =
-          await team1Response.json();
+  const summary = data?.summary || {};
 
-        const team2Data =
-          await team2Response.json();
+  const matches = data?.matches || [];
 
-        if (team1Response.ok) {
-          setTeam1Form(team1Data);
-        }
+  const visibleMatches =
+    showAllMatches
+      ? matches
+      : matches.slice(0, 10);
 
-        if (team2Response.ok) {
-          setTeam2Form(team2Data);
-        }
-      } catch (err) {
-        console.error(
-          "Form error:",
-          err
-        );
-      } finally {
-        setFormLoading(false);
-      }
-    }
+  const team1WinPercentage =
+    Number(
+      summary.team1WinPercentage || 0
+    );
 
-    if (team1Slug && team2Slug) {
-      fetchForms();
-    }
-  }, [
-    team1Slug,
-    team2Slug,
-  ]);
+  const team2WinPercentage =
+    Number(
+      summary.team2WinPercentage || 0
+    );
 
-  const rawTeam1 =
-    h2h?.teams?.team1;
+  const drawPercentage =
+    Number(summary.drawPercentage || 0);
 
-  const rawTeam2 =
-    h2h?.teams?.team2;
+  const totalGoals =
+    Number(summary.team1Goals || 0) +
+    Number(summary.team2Goals || 0);
 
-  const team1Name = getTeamName(
-    rawTeam1,
-    team1Slug
-  );
+  const goalDifference =
+    Number(summary.team1Goals || 0) -
+    Number(summary.team2Goals || 0);
 
-  const team2Name = getTeamName(
-    rawTeam2,
-    team2Slug
-  );
+  const highestScoringMatch = useMemo(() => {
+    if (!matches.length) return null;
 
-  const record =
-    h2h?.record &&
-    typeof h2h.record === "object"
-      ? h2h.record
-      : {};
+    return matches.reduce(
+      (highest, current) => {
+        const highestGoals =
+          Number(
+            highest.score?.home || 0
+          ) +
+          Number(
+            highest.score?.away || 0
+          );
 
-  const goals =
-    h2h?.goals &&
-    typeof h2h.goals === "object"
-      ? h2h.goals
-      : {};
+        const currentGoals =
+          Number(
+            current.score?.home || 0
+          ) +
+          Number(
+            current.score?.away || 0
+          );
 
-  const btts =
-    h2h?.btts &&
-    typeof h2h.btts === "object"
-      ? h2h.btts
-      : {};
+        return currentGoals > highestGoals
+          ? current
+          : highest;
+      },
+      matches[0]
+    );
+  }, [matches]);
 
-  const overGoals =
-    h2h?.overGoals &&
-    typeof h2h.overGoals === "object"
-      ? h2h.overGoals
-      : {};
+  if (loading) {
+    return (
+      <div className="min-h-screen overflow-x-hidden bg-[#080B12] text-[#F5F7FA]">
+        <header className="border-b border-white/5">
+          <div className="mx-auto flex max-w-7xl items-center justify-between px-4 py-4 sm:px-5 sm:py-5">
+            <Link
+              to="/"
+              className="flex items-center gap-2.5 sm:gap-3"
+            >
+              <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-[#B7F34A] font-black text-[#080B12]">
+                H
+              </div>
 
-  const cleanSheets =
-    h2h?.cleanSheets &&
-    typeof h2h.cleanSheets === "object"
-      ? h2h.cleanSheets
-      : {};
+              <span className="text-sm font-black tracking-tight sm:text-lg">
+                H2H VAULT
+              </span>
+            </Link>
+          </div>
+        </header>
 
-  const matches = Array.isArray(
-    h2h?.matches
-  )
-    ? h2h.matches
-    : [];
+        <main className="mx-auto max-w-7xl px-4 py-10 sm:px-5 sm:py-16">
+          <div className="rounded-3xl border border-white/10 bg-[#111722] p-6 text-center sm:p-10">
+            <div className="mx-auto h-10 w-10 animate-spin rounded-full border-2 border-white/10 border-t-[#B7F34A]" />
 
-  const team1Home =
-    homeAway?.team1Home;
+            <p className="mt-5 text-sm text-[#8B95A7]">
+              Loading head-to-head analytics...
+            </p>
+          </div>
+        </main>
+      </div>
+    );
+  }
 
-  const team2Home =
-    homeAway?.team2Home;
+  if (error) {
+    return (
+      <div className="min-h-screen overflow-x-hidden bg-[#080B12] text-[#F5F7FA]">
+        <header className="border-b border-white/5">
+          <div className="mx-auto flex max-w-7xl items-center justify-between px-4 py-4 sm:px-5 sm:py-5">
+            <Link
+              to="/"
+              className="flex items-center gap-2.5 sm:gap-3"
+            >
+              <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-[#B7F34A] font-black text-[#080B12]">
+                H
+              </div>
+
+              <span className="text-sm font-black tracking-tight sm:text-lg">
+                H2H VAULT
+              </span>
+            </Link>
+          </div>
+        </header>
+
+        <main className="mx-auto max-w-3xl px-4 py-10 sm:px-5 sm:py-16">
+          <div className="rounded-3xl border border-red-500/20 bg-[#111722] p-6 text-center sm:p-8">
+            <div className="mx-auto flex h-14 w-14 items-center justify-center rounded-2xl bg-red-500/10 text-xl text-red-400">
+              !
+            </div>
+
+            <h1 className="mt-5 text-lg font-bold sm:text-xl">
+              Unable to load H2H data
+            </h1>
+
+            <p className="mt-3 break-words text-sm leading-6 text-[#8B95A7]">
+              {error}
+            </p>
+
+            <Link
+              to="/"
+              className="mt-6 inline-flex rounded-xl bg-[#B7F34A] px-5 py-3 text-sm font-bold text-[#080B12] transition hover:opacity-90"
+            >
+              Back to H2H Vault
+            </Link>
+          </div>
+        </main>
+      </div>
+    );
+  }
 
   return (
-    <div className="min-h-screen bg-[#080b12] text-[#f5f7fa]">
-      <header className="border-b border-white/10 bg-[#080b12]/95">
-        <div className="mx-auto flex max-w-7xl items-center justify-between px-4 py-5 sm:px-6 lg:px-8">
+    <div className="min-h-screen overflow-x-hidden bg-[#080B12] text-[#F5F7FA]">
+      {/* HEADER */}
+      <header className="sticky top-0 z-30 border-b border-white/5 bg-[#080B12]/95 backdrop-blur-xl">
+        <div className="mx-auto flex max-w-7xl items-center justify-between px-4 py-3 sm:px-5 sm:py-4">
           <Link
             to="/"
-            className="text-lg font-black tracking-tight text-white"
+            className="flex items-center gap-2.5 sm:gap-3"
           >
-            Football{" "}
-            <span className="text-lime-400">
-              H2H
-            </span>{" "}
-            Vault
+            <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-[#B7F34A] font-black text-[#080B12]">
+              H
+            </div>
+
+            <span className="text-sm font-black tracking-tight sm:text-lg">
+              H2H VAULT
+            </span>
           </Link>
 
           <Link
             to="/"
-            className="rounded-full border border-white/10 px-4 py-2 text-sm font-semibold text-slate-300 transition hover:border-lime-400/40 hover:text-lime-400"
+            className="rounded-xl border border-white/10 px-3 py-2 text-xs font-semibold text-[#8B95A7] transition hover:border-[#B7F34A]/30 hover:text-[#B7F34A] sm:px-4 sm:text-sm"
           >
-            New Search
+            ← Back
           </Link>
         </div>
       </header>
 
-      <main className="mx-auto max-w-7xl px-4 py-8 sm:px-6 lg:px-8">
-        {error && (
-          <div className="mb-6 rounded-2xl border border-red-500/20 bg-red-500/10 p-4 text-sm text-red-300">
-            {safeText(error)}
-          </div>
-        )}
+      <main className="mx-auto max-w-7xl px-4 py-5 sm:px-5 sm:py-8">
+        {/* HERO */}
+        <section className="relative overflow-hidden rounded-3xl border border-white/10 bg-[#111722] p-5 sm:p-8">
+          <div className="pointer-events-none absolute -left-20 -top-20 h-64 w-64 rounded-full bg-[#B7F34A]/5 blur-3xl" />
 
-        <section className="mb-8">
-          <p className="text-xs font-semibold uppercase tracking-[0.25em] text-lime-400">
-            Head-to-Head
-          </p>
+          <div className="relative">
+            <div className="mb-6 flex flex-wrap items-center gap-2 sm:mb-8">
+              <span className="rounded-full border border-[#B7F34A]/20 bg-[#B7F34A]/5 px-3 py-1 text-[9px] font-bold uppercase tracking-widest text-[#B7F34A] sm:text-[10px]">
+                Head-to-Head
+              </span>
 
-          <div className="mt-3">
-            <h1 className="text-4xl font-black tracking-tight sm:text-5xl">
-              {team1Name}{" "}
-              <span className="text-slate-600">
-                vs
-              </span>{" "}
-              {team2Name}
-            </h1>
+              <span className="text-[11px] text-[#596274] sm:text-xs">
+                {summary.totalMatches || 0} recorded meetings
+              </span>
+            </div>
 
-            <p className="mt-3 max-w-2xl text-sm leading-6 text-slate-400">
-              The history behind every matchup.
-              Explore results, form, scoring
-              patterns, and home versus away
-              records.
-            </p>
+            <div className="grid items-center gap-6 md:grid-cols-[1fr_auto_1fr] md:gap-8">
+              <TeamHeader team={team1} />
+
+              <div className="flex items-center justify-center gap-3 md:block">
+                <div className="h-px w-10 bg-white/10 md:mx-auto md:w-20" />
+
+                <p className="text-[10px] font-bold uppercase tracking-[0.3em] text-[#596274]">
+                  VS
+                </p>
+
+                <div className="h-px w-10 bg-white/10 md:mx-auto md:mt-3 md:w-20" />
+              </div>
+
+              <TeamHeader
+                team={team2}
+                side="right"
+              />
+            </div>
           </div>
         </section>
 
-        <section className="mb-8 rounded-2xl border border-white/10 bg-[#111722] p-4">
-          <div className="grid gap-4 md:grid-cols-3">
-            <div>
-              <label className="mb-2 block text-xs font-semibold uppercase tracking-[0.15em] text-slate-500">
-                Competition
-              </label>
+        {/* RECORD */}
+        <section className="mt-5 sm:mt-6">
+          <Section
+            title="H2H Record"
+            description="Historical results between these two teams."
+          >
+            <div className="grid gap-3 md:grid-cols-3 sm:gap-4">
+              <div className="rounded-2xl border border-[#B7F34A]/20 bg-[#B7F34A]/5 p-5 text-center sm:p-6">
+                <p className="break-words text-[10px] uppercase tracking-wider text-[#596274] sm:text-xs">
+                  {team1?.name}
+                </p>
 
-              <select
-                value={selectedCompetition}
-                onChange={(event) =>
-                  setSelectedCompetition(
-                    event.target.value
-                  )
-                }
-                className="w-full rounded-xl border border-white/10 bg-[#0b1018] px-4 py-3 text-sm text-white outline-none transition focus:border-lime-400/50"
-              >
-                <option value="">
-                  All competitions
-                </option>
+                <p className="mt-2 text-3xl font-black text-[#B7F34A] sm:mt-3 sm:text-4xl">
+                  {summary.team1Wins || 0}
+                </p>
 
-                {competitions.map(
-                  (competition) => (
-                    <option
-                      key={
-                        competition.id ||
-                        competition.external_id
-                      }
-                      value={safeText(
-                        competition.slug
-                      )}
-                    >
-                      {safeText(
-                        competition.name
-                      )}
-                    </option>
-                  )
-                )}
-              </select>
+                <p className="mt-1 text-xs text-[#8B95A7] sm:text-sm">
+                  {formatPercentage(
+                    team1WinPercentage
+                  )}
+                </p>
+              </div>
+
+              <div className="rounded-2xl border border-white/10 bg-[#080B12] p-5 text-center sm:p-6">
+                <p className="text-[10px] uppercase tracking-wider text-[#596274] sm:text-xs">
+                  Draws
+                </p>
+
+                <p className="mt-2 text-3xl font-black text-[#F5F7FA] sm:mt-3 sm:text-4xl">
+                  {summary.draws || 0}
+                </p>
+
+                <p className="mt-1 text-xs text-[#8B95A7] sm:text-sm">
+                  {formatPercentage(
+                    drawPercentage
+                  )}
+                </p>
+              </div>
+
+              <div className="rounded-2xl border border-white/10 bg-[#080B12] p-5 text-center sm:p-6">
+                <p className="break-words text-[10px] uppercase tracking-wider text-[#596274] sm:text-xs">
+                  {team2?.name}
+                </p>
+
+                <p className="mt-2 text-3xl font-black text-[#F5F7FA] sm:mt-3 sm:text-4xl">
+                  {summary.team2Wins || 0}
+                </p>
+
+                <p className="mt-1 text-xs text-[#8B95A7] sm:text-sm">
+                  {formatPercentage(
+                    team2WinPercentage
+                  )}
+                </p>
+              </div>
             </div>
 
-            <div>
-              <label className="mb-2 block text-xs font-semibold uppercase tracking-[0.15em] text-slate-500">
-                Season
-              </label>
+            <div className="mt-4 h-2.5 overflow-hidden rounded-full bg-white/5 sm:mt-5 sm:h-3">
+              <div className="flex h-full">
+                <div
+                  className="bg-[#B7F34A]"
+                  style={{
+                    width: `${team1WinPercentage}%`,
+                  }}
+                />
 
-              <select
-                value={selectedSeason}
-                onChange={(event) =>
-                  setSelectedSeason(
-                    event.target.value
-                  )
-                }
-                className="w-full rounded-xl border border-white/10 bg-[#0b1018] px-4 py-3 text-sm text-white outline-none transition focus:border-lime-400/50"
-              >
-                <option value="">
-                  All seasons
-                </option>
+                <div
+                  className="bg-white/20"
+                  style={{
+                    width: `${drawPercentage}%`,
+                  }}
+                />
 
-                {seasons.map((season) => (
-                  <option
-                    key={
-                      season.id ||
-                      season.external_id
-                    }
-                    value={safeText(
-                      season.name
-                    )}
-                  >
-                    {safeText(
-                      season.name
-                    )}
-                  </option>
-                ))}
-              </select>
+                <div
+                  className="bg-white/10"
+                  style={{
+                    width: `${team2WinPercentage}%`,
+                  }}
+                />
+              </div>
             </div>
+          </Section>
+        </section>
 
-            <div>
-              <label className="mb-2 block text-xs font-semibold uppercase tracking-[0.15em] text-slate-500">
-                Meetings
-              </label>
+        {/* CORE STATS */}
+        <section className="mt-5 sm:mt-6">
+          <Section
+            title="Core Statistics"
+            description="Aggregate scoring and defensive numbers across all recorded meetings."
+          >
+            <div className="grid grid-cols-2 gap-3 lg:grid-cols-4 sm:gap-4">
+              <StatCard
+                label="Meetings"
+                value={
+                  summary.totalMatches || 0
+                }
+              />
 
-              <select
-                value={limit}
-                onChange={(event) =>
-                  setLimit(
-                    Number(
-                      event.target.value
+              <StatCard
+                label="Total Goals"
+                value={totalGoals}
+                accent
+              />
+
+              <StatCard
+                label="Average Goals"
+                value={Number(
+                  summary.averageGoals || 0
+                ).toFixed(2)}
+                subtext="per match"
+              />
+
+              <StatCard
+                label="Goal Difference"
+                value={
+                  goalDifference > 0
+                    ? `+${goalDifference}`
+                    : goalDifference
+                }
+                subtext={`${team1?.short_name || team1?.name} perspective`}
+              />
+
+              <StatCard
+                label={`${team1?.short_name || team1?.name} Goals`}
+                value={
+                  summary.team1Goals || 0
+                }
+              />
+
+              <StatCard
+                label={`${team2?.short_name || team2?.name} Goals`}
+                value={
+                  summary.team2Goals || 0
+                }
+              />
+
+              <StatCard
+                label={`${team1?.short_name || team1?.name} Clean Sheets`}
+                value={
+                  summary.cleanSheets
+                    ?.team1 || 0
+                }
+              />
+
+              <StatCard
+                label={`${team2?.short_name || team2?.name} Clean Sheets`}
+                value={
+                  summary.cleanSheets
+                    ?.team2 || 0
+                }
+              />
+            </div>
+          </Section>
+        </section>
+
+        {/* GOAL MARKETS */}
+        <section className="mt-5 sm:mt-6">
+          <Section
+            title="Goal Markets"
+            description="How often different scoring thresholds have been reached."
+          >
+            <div className="grid gap-7 lg:grid-cols-2 lg:gap-8">
+              <div>
+                <h3 className="mb-5 text-xs font-bold uppercase tracking-wider text-[#8B95A7] sm:text-sm">
+                  Over
+                </h3>
+
+                <div className="space-y-5">
+                  {[
+                    ["Over 0.5", summary.over05],
+                    ["Over 1.5", summary.over15],
+                    ["Over 2.5", summary.over25],
+                    ["Over 3.5", summary.over35],
+                    ["Over 4.5", summary.over45],
+                  ].map(
+                    ([label, market]) => (
+                      <PercentageBar
+                        key={label}
+                        label={label}
+                        percentage={
+                          market?.percentage || 0
+                        }
+                        count={
+                          market?.count || 0
+                        }
+                        total={
+                          summary.totalMatches
+                        }
+                      />
                     )
-                  )
-                }
-                className="w-full rounded-xl border border-white/10 bg-[#0b1018] px-4 py-3 text-sm text-white outline-none transition focus:border-lime-400/50"
-              >
-                <option value={5}>
-                  Last 5
-                </option>
-
-                <option value={10}>
-                  Last 10
-                </option>
-
-                <option value={20}>
-                  Last 20
-                </option>
-
-                <option value={50}>
-                  Last 50
-                </option>
-              </select>
-            </div>
-          </div>
-        </section>
-
-        <section className="mb-10 grid gap-5 lg:grid-cols-2">
-          <FormCard
-            team={rawTeam1}
-            form={team1Form?.form}
-            matches={team1Form?.matches}
-            loading={formLoading}
-          />
-
-          <FormCard
-            team={rawTeam2}
-            form={team2Form?.form}
-            matches={team2Form?.matches}
-            loading={formLoading}
-          />
-        </section>
-
-        <section className="mb-10">
-          <div className="mb-5">
-            <p className="text-xs font-semibold uppercase tracking-[0.2em] text-lime-400">
-              Home & Away
-            </p>
-
-            <h2 className="mt-2 text-2xl font-black text-white">
-              Where the matchup happened
-            </h2>
-
-            <p className="mt-2 text-sm text-slate-500">
-              Compare the historical H2H record
-              when each team hosted the fixture.
-            </p>
-          </div>
-
-          {homeAwayLoading ? (
-            <div className="rounded-2xl border border-white/10 bg-[#111722] p-6">
-              <p className="text-sm text-slate-500">
-                Loading home and away records...
-              </p>
-            </div>
-          ) : homeAway ? (
-            <div className="grid gap-5 lg:grid-cols-2">
-              <HomeAwayCard
-                title={`${team1Name} at Home`}
-                subtitle="Home team"
-                data={team1Home}
-                homeTeam={team1Name}
-                opponentTeam={team2Name}
-                homeTeamKey="team1Wins"
-                opponentTeamKey="team2Wins"
-              />
-
-              <HomeAwayCard
-                title={`${team2Name} at Home`}
-                subtitle="Home team"
-                data={team2Home}
-                homeTeam={team2Name}
-                opponentTeam={team1Name}
-                homeTeamKey="team2Wins"
-                opponentTeamKey="team1Wins"
-              />
-            </div>
-          ) : (
-            <div className="rounded-2xl border border-white/10 bg-[#111722] p-6">
-              <p className="text-sm text-slate-500">
-                Home and away data is not available.
-              </p>
-            </div>
-          )}
-        </section>
-
-        {loading ? (
-          <div className="rounded-2xl border border-white/10 bg-[#111722] p-8 text-center">
-            <p className="text-sm text-slate-500">
-              Loading H2H history...
-            </p>
-          </div>
-        ) : h2h ? (
-          <>
-            <section className="mb-10">
-              <div className="mb-5">
-                <p className="text-xs font-semibold uppercase tracking-[0.2em] text-lime-400">
-                  Overall Record
-                </p>
-
-                <h2 className="mt-2 text-2xl font-black text-white">
-                  Head-to-head record
-                </h2>
+                  )}
+                </div>
               </div>
 
-              <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
-                <StatCard
-                  label="Meetings"
-                  value={getNumber(
-                    record.meetings,
-                    matches.length
-                  )}
-                />
+              <div>
+                <h3 className="mb-5 text-xs font-bold uppercase tracking-wider text-[#8B95A7] sm:text-sm">
+                  Under
+                </h3>
 
-                <StatCard
-                  label={`${team1Name} Wins`}
-                  value={getNumber(
-                    record.team1Wins
-                  )}
-                />
-
-                <StatCard
-                  label="Draws"
-                  value={getNumber(
-                    record.draws
-                  )}
-                />
-
-                <StatCard
-                  label={`${team2Name} Wins`}
-                  value={getNumber(
-                    record.team2Wins
-                  )}
-                />
-              </div>
-            </section>
-
-            <section className="mb-10">
-              <div className="mb-5">
-                <p className="text-xs font-semibold uppercase tracking-[0.2em] text-lime-400">
-                  Goals
-                </p>
-
-                <h2 className="mt-2 text-2xl font-black text-white">
-                  Scoring history
-                </h2>
-              </div>
-
-              <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
-                <StatCard
-                  label={`${team1Name} Goals`}
-                  value={getNumber(
-                    goals.team1
-                  )}
-                />
-
-                <StatCard
-                  label={`${team2Name} Goals`}
-                  value={getNumber(
-                    goals.team2
-                  )}
-                />
-
-                <StatCard
-                  label="Total Goals"
-                  value={getNumber(
-                    goals.total
-                  )}
-                />
-
-                <StatCard
-                  label="Average Goals"
-                  value={getNumber(
-                    goals.average
-                  ).toFixed(2)}
-                />
-              </div>
-            </section>
-
-            <section className="mb-10">
-              <div className="mb-5">
-                <p className="text-xs font-semibold uppercase tracking-[0.2em] text-lime-400">
-                  Both Teams To Score
-                </p>
-
-                <h2 className="mt-2 text-2xl font-black text-white">
-                  BTTS history
-                </h2>
-              </div>
-
-              <div className="grid gap-4 md:grid-cols-2">
-                <StatCard
-                  label="BTTS Yes"
-                  value={getNumber(
-                    btts.yes
-                  )}
-                />
-
-                <StatCard
-                  label="BTTS No"
-                  value={getNumber(
-                    btts.no
-                  )}
-                />
-              </div>
-            </section>
-
-            <section className="mb-10">
-              <div className="mb-5">
-                <p className="text-xs font-semibold uppercase tracking-[0.2em] text-lime-400">
-                  Goal Lines
-                </p>
-
-                <h2 className="mt-2 text-2xl font-black text-white">
-                  Over goals
-                </h2>
-              </div>
-
-              <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
-                <GoalStat
-                  label="Over 0.5"
-                  value={overGoals.over05}
-                  total={
-                    record.meetings ??
-                    matches.length
-                  }
-                />
-
-                <GoalStat
-                  label="Over 1.5"
-                  value={overGoals.over15}
-                  total={
-                    record.meetings ??
-                    matches.length
-                  }
-                />
-
-                <GoalStat
-                  label="Over 2.5"
-                  value={overGoals.over25}
-                  total={
-                    record.meetings ??
-                    matches.length
-                  }
-                />
-
-                <GoalStat
-                  label="Over 3.5"
-                  value={overGoals.over35}
-                  total={
-                    record.meetings ??
-                    matches.length
-                  }
-                />
-
-                <GoalStat
-                  label="Over 4.5"
-                  value={overGoals.over45}
-                  total={
-                    record.meetings ??
-                    matches.length
-                  }
-                />
-              </div>
-            </section>
-
-            <section className="mb-10">
-              <div className="mb-5">
-                <p className="text-xs font-semibold uppercase tracking-[0.2em] text-lime-400">
-                  Defensive Record
-                </p>
-
-                <h2 className="mt-2 text-2xl font-black text-white">
-                  Clean sheets
-                </h2>
-              </div>
-
-              <div className="grid gap-4 md:grid-cols-2">
-                <StatCard
-                  label={`${team1Name} Clean Sheets`}
-                  value={getNumber(
-                    cleanSheets.team1
-                  )}
-                />
-
-                <StatCard
-                  label={`${team2Name} Clean Sheets`}
-                  value={getNumber(
-                    cleanSheets.team2
-                  )}
-                />
-              </div>
-            </section>
-
-            <section>
-              <div className="mb-5">
-                <p className="text-xs font-semibold uppercase tracking-[0.2em] text-lime-400">
-                  Match History
-                </p>
-
-                <h2 className="mt-2 text-2xl font-black text-white">
-                  Recent meetings
-                </h2>
-              </div>
-
-              <div className="overflow-hidden rounded-2xl border border-white/10 bg-[#111722]">
-                {matches.length > 0 ? (
-                  <div className="divide-y divide-white/5">
-                    {matches.map(
-                      (match, index) => {
-                        const homeTeam =
-                          safeText(
-                            match?.home_team,
-                            "Unknown team"
-                          );
-
-                        const awayTeam =
-                          safeText(
-                            match?.away_team,
-                            "Unknown team"
-                          );
-
-                        const homeScore =
-                          safeText(
-                            match?.home_score,
-                            "-"
-                          );
-
-                        const awayScore =
-                          safeText(
-                            match?.away_score,
-                            "-"
-                          );
-
-                        const venue =
-                          safeText(
-                            match?.venue,
-                            ""
-                          );
-
-                        const competition =
-                          safeText(
-                            match?.competition,
-                            ""
-                          );
-
-                        const season =
-                          safeText(
-                            match?.season,
-                            ""
-                          );
-
-                        return (
-                          <div
-                            key={
-                              match?.id ??
-                              `${homeTeam}-${awayTeam}-${index}`
-                            }
-                            className="grid gap-4 px-5 py-5 md:grid-cols-[1fr_auto_1fr] md:items-center"
-                          >
-                            <div>
-                              <p className="text-sm font-semibold text-white">
-                                {homeTeam}
-                              </p>
-
-                              <p className="mt-1 text-xs text-slate-500">
-                                {venue}
-                              </p>
-                            </div>
-
-                            <div className="text-left md:text-center">
-                              <p className="text-xl font-black text-white">
-                                {homeScore}{" "}
-                                -{" "}
-                                {awayScore}
-                              </p>
-
-                              <p className="mt-1 text-xs text-slate-500">
-                                {formatDate(
-                                  match?.match_date
-                                )}
-                              </p>
-                            </div>
-
-                            <div className="md:text-right">
-                              <p className="text-sm font-semibold text-white">
-                                {awayTeam}
-                              </p>
-
-                              <p className="mt-1 text-xs text-slate-500">
-                                {competition}
-
-                                {season
-                                  ? ` · ${season}`
-                                  : ""}
-                              </p>
-                            </div>
-                          </div>
+                <div className="space-y-5">
+                  {[
+                    ["Under 0.5", summary.over05],
+                    ["Under 1.5", summary.over15],
+                    ["Under 2.5", summary.over25],
+                    ["Under 3.5", summary.over35],
+                    ["Under 4.5", summary.over45],
+                  ].map(
+                    ([label, market]) => {
+                      const overCount =
+                        Number(
+                          market?.count || 0
                         );
+
+                      const total =
+                        Number(
+                          summary.totalMatches ||
+                            0
+                        );
+
+                      const underCount =
+                        Math.max(
+                          total - overCount,
+                          0
+                        );
+
+                      const underPercentage =
+                        total > 0
+                          ? (underCount /
+                              total) *
+                            100
+                          : 0;
+
+                      return (
+                        <PercentageBar
+                          key={label}
+                          label={label}
+                          percentage={
+                            underPercentage
+                          }
+                          count={underCount}
+                          total={total}
+                        />
+                      );
+                    }
+                  )}
+                </div>
+              </div>
+            </div>
+
+            <div className="mt-7 grid gap-3 md:grid-cols-3 sm:mt-8 sm:gap-4">
+              <StatCard
+                label="BTTS"
+                value={formatPercentage(
+                  summary.btts?.percentage ||
+                    0
+                )}
+                subtext={`${
+                  summary.btts?.count || 0
+                } matches`}
+                accent
+              />
+
+              <StatCard
+                label={`${team1?.short_name || team1?.name} Clean Sheets`}
+                value={
+                  summary.cleanSheets
+                    ?.team1 || 0
+                }
+                subtext="matches without conceding"
+              />
+
+              <StatCard
+                label={`${team2?.short_name || team2?.name} Clean Sheets`}
+                value={
+                  summary.cleanSheets
+                    ?.team2 || 0
+                }
+                subtext="matches without conceding"
+              />
+            </div>
+          </Section>
+        </section>
+
+        {/* FORM */}
+        <section className="mt-5 sm:mt-6">
+          <Section
+            title="Recent H2H Form"
+            description="Results from the latest recorded meetings."
+          >
+            <div className="grid gap-4 md:grid-cols-2 sm:gap-5">
+              <FormCard
+                team={team1}
+                matches={matches}
+              />
+
+              <FormCard
+                team={team2}
+                matches={matches}
+              />
+            </div>
+          </Section>
+        </section>
+
+        {/* HOME AWAY */}
+        <section className="mt-5 sm:mt-6">
+          <Section
+            title="Home & Away Breakdown"
+            description="How the H2H record looks according to which team hosted the match."
+          >
+            {homeAway ? (
+              <div className="grid gap-4 md:grid-cols-2 sm:gap-5">
+                <HomeAwayCard
+                  title={`${team1?.name} at Home`}
+                  team={team1}
+                  matches={
+                    homeAway.team1Home || []
+                  }
+                />
+
+                <HomeAwayCard
+                  title={`${team2?.name} at Home`}
+                  team={team2}
+                  matches={
+                    homeAway.team2Home || []
+                  }
+                />
+              </div>
+            ) : (
+              <div className="rounded-2xl border border-white/5 bg-[#080B12] p-6 text-center">
+                <p className="text-xs leading-5 text-[#596274] sm:text-sm">
+                  Home/away breakdown is currently unavailable.
+                </p>
+              </div>
+            )}
+          </Section>
+        </section>
+
+        {/* HIGHEST SCORING */}
+        {highestScoringMatch && (
+          <section className="mt-5 sm:mt-6">
+            <Section
+              title="Highest-Scoring Meeting"
+              description="The meeting with the most combined goals in the current dataset."
+            >
+              <div className="rounded-2xl border border-[#B7F34A]/10 bg-[#080B12] p-5 sm:p-6">
+                <div className="grid items-center gap-4 md:grid-cols-[1fr_auto_1fr] md:gap-6">
+                  <div className="text-center md:text-right">
+                    <p className="break-words text-sm font-semibold text-[#F5F7FA]">
+                      {
+                        highestScoringMatch
+                          .homeTeam?.name
                       }
-                    )}
-                  </div>
-                ) : (
-                  <div className="p-8 text-center">
-                    <p className="text-sm text-slate-500">
-                      No meetings found for
-                      the selected filters.
                     </p>
                   </div>
-                )}
+
+                  <div className="text-center">
+                    <div className="text-3xl font-black text-[#B7F34A] sm:text-4xl">
+                      {
+                        highestScoringMatch
+                          .score?.home
+                      }
+
+                      <span className="mx-2 text-[#596274]">
+                        -
+                      </span>
+
+                      {
+                        highestScoringMatch
+                          .score?.away
+                      }
+                    </div>
+
+                    <p className="mt-2 text-[10px] text-[#596274] sm:text-xs">
+                      {formatDate(
+                        highestScoringMatch.date
+                      )}
+                    </p>
+                  </div>
+
+                  <div className="text-center md:text-left">
+                    <p className="break-words text-sm font-semibold text-[#F5F7FA]">
+                      {
+                        highestScoringMatch
+                          .awayTeam?.name
+                      }
+                    </p>
+                  </div>
+                </div>
+
+                <div className="mt-5 flex flex-wrap justify-center gap-2 text-[10px] text-[#596274] sm:text-xs">
+                  {highestScoringMatch
+                    .competition?.name && (
+                    <span className="max-w-full break-words rounded-full bg-[#111722] px-3 py-1">
+                      {
+                        highestScoringMatch
+                          .competition.name
+                      }
+                    </span>
+                  )}
+
+                  {highestScoringMatch
+                    .season?.name && (
+                    <span className="max-w-full break-words rounded-full bg-[#111722] px-3 py-1">
+                      {
+                        highestScoringMatch.season
+                          .name
+                      }
+                    </span>
+                  )}
+
+                  {highestScoringMatch.venue && (
+                    <span className="max-w-full break-words rounded-full bg-[#111722] px-3 py-1">
+                      {
+                        highestScoringMatch.venue
+                      }
+                    </span>
+                  )}
+                </div>
               </div>
-            </section>
-          </>
-        ) : null}
+            </Section>
+          </section>
+        )}
+
+        {/* PREVIOUS MEETINGS */}
+        <section className="mt-5 sm:mt-6">
+          <Section
+            title="Previous Meetings"
+            description={`Showing ${
+              visibleMatches.length
+            } of ${
+              matches.length
+            } recorded meetings.`}
+          >
+            {matches.length > 0 ? (
+              <>
+                <div className="overflow-hidden rounded-2xl border border-white/5 bg-[#080B12] px-3 sm:px-4">
+                  {visibleMatches.map(
+                    (match) => (
+                      <MeetingRow
+                        key={match.id}
+                        match={match}
+                        team1={team1}
+                        team2={team2}
+                      />
+                    )
+                  )}
+                </div>
+
+                {matches.length > 10 && (
+                  <div className="mt-5 text-center">
+                    <button
+                      type="button"
+                      onClick={() =>
+                        setShowAllMatches(
+                          (current) => !current
+                        )
+                      }
+                      className="w-full rounded-xl border border-white/10 px-5 py-3 text-xs font-semibold text-[#8B95A7] transition hover:border-[#B7F34A]/30 hover:text-[#B7F34A] sm:w-auto sm:text-sm"
+                    >
+                      {showAllMatches
+                        ? "Show fewer meetings"
+                        : `Show all ${matches.length} meetings`}
+                    </button>
+                  </div>
+                )}
+              </>
+            ) : (
+              <div className="rounded-2xl border border-white/5 bg-[#080B12] p-8 text-center sm:p-10">
+                <p className="text-xs leading-5 text-[#596274] sm:text-sm">
+                  No completed H2H meetings are currently stored for these teams.
+                </p>
+              </div>
+            )}
+          </Section>
+        </section>
+
+        {/* DATA INFORMATION */}
+        <section className="mt-5 sm:mt-6">
+          <div className="rounded-2xl border border-white/5 bg-[#111722] p-4 sm:p-5">
+            <div className="flex flex-col gap-4 sm:flex-row sm:items-start">
+              <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-[#B7F34A]/10 text-[#B7F34A]">
+                i
+              </div>
+
+              <div className="min-w-0">
+                <h3 className="font-semibold text-[#F5F7FA]">
+                  About these statistics
+                </h3>
+
+                <p className="mt-2 text-xs leading-6 text-[#8B95A7] sm:text-sm">
+                  H2H Vault calculates the statistics
+                  from the completed matches stored in
+                  the application database. The dashboard
+                  does not treat a provider as the source
+                  of the calculated percentages or
+                  head-to-head results.
+                </p>
+
+                <div className="mt-4 flex flex-wrap gap-2">
+                  {[
+                    ...new Set(
+                      matches
+                        .map(
+                          (match) =>
+                            match.provider
+                        )
+                        .filter(Boolean)
+                    ),
+                  ].map((provider) => (
+                    <span
+                      key={provider}
+                      className="max-w-full break-words rounded-full border border-white/10 bg-[#080B12] px-3 py-1 text-[10px] text-[#596274] sm:text-xs"
+                    >
+                      Source: {provider}
+                    </span>
+                  ))}
+                </div>
+              </div>
+            </div>
+          </div>
+        </section>
       </main>
 
-      <footer className="mt-16 border-t border-white/10">
-        <div className="mx-auto max-w-7xl px-4 py-8 text-center sm:px-6 lg:px-8">
-          <p className="text-xs text-slate-600">
-            Football H2H Vault — The history behind
-            every matchup.
+      {/* FOOTER */}
+      <footer className="mt-8 border-t border-white/5 sm:mt-12">
+        <div className="mx-auto flex max-w-7xl flex-col gap-3 px-4 py-7 text-center sm:flex-row sm:items-center sm:justify-between sm:px-5 sm:py-8 sm:text-left">
+          <div className="flex items-center justify-center gap-2 sm:justify-start">
+            <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-[#B7F34A] text-xs font-black text-[#080B12]">
+              H
+            </div>
+
+            <span className="text-sm font-bold">
+              H2H VAULT
+            </span>
+          </div>
+
+          <p className="text-xs text-[#596274]">
+            Football head-to-head analytics
           </p>
         </div>
       </footer>

@@ -1,40 +1,113 @@
+
+require("dotenv").config();
+
 const express = require("express");
 const cors = require("cors");
 
-const h2hRoutes = require("./routes/h2h");
-const teamsRoutes = require("./routes/teams");
-const competitionsRoutes = require("./routes/competitions");
-const seasonsRoutes = require("./routes/seasons");
+const teamsRouter = require("./routes/teams");
+const competitionsRouter = require("./routes/competitions");
+const seasonsRouter = require("./routes/seasons");
+const fixturesRouter = require("./routes/fixtures");
+const teamImportRouter = require("./routes/teamImport");
+const matchesRouter = require("./routes/matches");
+const h2hRouter = require("./routes/h2h");
 
 const app = express();
 
-const PORT = 3001;
+const PORT = process.env.PORT || 3001;
 
-app.use(cors());
+/*
+|--------------------------------------------------------------------------
+| Middleware
+|--------------------------------------------------------------------------
+*/
+
+app.use(
+  cors({
+    origin: true,
+    credentials: true,
+  })
+);
+
 app.use(express.json());
 
-app.use("/api/h2h", h2hRoutes);
-app.use("/api/teams", teamsRoutes);
-app.use("/api/competitions", competitionsRoutes);
-app.use("/api/seasons", seasonsRoutes);
+/*
+|--------------------------------------------------------------------------
+| Health Check
+|--------------------------------------------------------------------------
+*/
 
-app.get("/", (req, res) => {
+app.get("/health", (req, res) => {
   res.json({
+    status: "success",
+    service: "football-h2h-vault-backend",
+    message: "Football H2H API is running",
+  });
+});
+
+/*
+|--------------------------------------------------------------------------
+| API Routes
+|--------------------------------------------------------------------------
+*/
+
+app.use("/api/teams", teamsRouter);
+
+app.use(
+  "/api/competitions",
+  competitionsRouter
+);
+
+app.use("/api/seasons", seasonsRouter);
+
+app.use("/api/fixtures", fixturesRouter);
+
+app.use(
+  "/api/team-import",
+  teamImportRouter
+);
+
+app.use("/api/matches", matchesRouter);
+
+app.use("/api/h2h", h2hRouter);
+
+/*
+|--------------------------------------------------------------------------
+| 404 Handler
+|--------------------------------------------------------------------------
+*/
+
+app.use((req, res) => {
+  res.status(404).json({
+    status: "error",
+    message: `Route not found: ${req.method} ${req.originalUrl}`,
+  });
+});
+
+/*
+|--------------------------------------------------------------------------
+| Global Error Handler
+|--------------------------------------------------------------------------
+*/
+
+app.use((err, req, res, next) => {
+  console.error("Unhandled server error:", err);
+
+  res.status(err.status || 500).json({
+    status: "error",
     message:
-      "Football H2H Vault API is running",
+      err.message || "Internal server error",
   });
 });
 
-app.get("/api/health", (req, res) => {
-  res.json({
-    status: "ok",
-    service:
-      "football-h2h-vault-api",
-  });
-});
+/*
+|--------------------------------------------------------------------------
+| Start Server
+|--------------------------------------------------------------------------
+*/
 
 app.listen(PORT, () => {
   console.log(
-    `Football H2H Vault API running on port ${PORT}`
+    `Football H2H backend running on port ${PORT}`
   );
 });

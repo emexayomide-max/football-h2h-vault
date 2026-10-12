@@ -3,776 +3,743 @@ const pool = require("../db");
 
 const router = express.Router();
 
+const INTERNAL_BACKEND_URL =
+  process.env.BACKEND_INTERNAL_URL ||
+  `http://127.0.0.1:${process.env.PORT || 3001}`;
+
+function normalizeText(value) {
+  return String(value || "")
+    .trim()
+    .toLowerCase();
+}
+
+async function findTeam(identifier) {
+  const value = normalizeText(identifier);
+
+  const result = await pool.query(
+    `
+    SELECT
+      id,
+      name,
+      short_name,
+      slug,
+      logo_url
+    FROM teams
+    WHERE
+      LOWER(slug) = $1
+      OR LOWER(name) = $1
+      OR LOWER(short_name) = $1
+    LIMIT 1
+    `,
+    [value]
+  );
+
+  return result.rows[0] || null;
+}
+
 /*
- * ==========================================
- * HOME / AWAY H2H
- * ==========================================
- *
- * IMPORTANT:
- * This route must come BEFORE the general
- * /:team1Slug/:team2Slug route below.
- */
-router.get(
-  "/:team1Slug/:team2Slug/home-away",
-  async (req, res) => {
-    const {
-      team1Slug,
-      team2Slug,
-    } = req.params;
+  Check whether we already have at least one finished H2H match
+  between the two teams.
 
-    try {
-      /*
-       * Find both teams
-       */
-      const teamsResult = await pool.query(
-        `
-        SELECT
-            id,
-            external_id,
-            name,
-            short_name,
-            country,
-            logo_url,
-            slug
-        FROM teams
-        WHERE slug IN ($1, $2)
-        `,
-        [team1Slug, team2Slug]
-      );
+  We use this to avoid calling the provider APIs on every
+  frontend page refresh.
+*/
+async function hasH2HData(team1Id, team2Id) {
+  const result = await pool.query(
+    `
+    SELECT COUNT(*)::integer AS count
+    FROM matches
+    WHERE
+      (
+        (home_team_id = $1 AND away_team_id = $2)
+        OR
+        (home_team_id = $2 AND away_team_id = $1)
+      )
+      AND status = 'finished'
+      AND home_score IS NOT NULL
+      AND away_score IS NOT NULL
+    `,
+    [team1Id, team2Id]
+  );
 
-      if (teamsResult.rows.length !== 2) {
-        return res.status(404).json({
-          status: "error",
-          message: "One or both teams not found",
-        });
-      }
+  return Number(result.rows[0]?.count || 0) > 0;
+}
 
-      const team1 = teamsResult.rows.find(
-        (team) => team.slug === team1Slug
-      );
+/*
+  Trigger the existing H2H importer.
 
-      const team2 = teamsResult.rows.find(
-        (team) => team.slug === team2Slug
-      );
+  We intentionally reuse:
+    POST /api/matches/import-h2h/:team1/:team2
 
-      /*
-       * Find all finished H2H meetings
-       */
-      const matchesResult = await pool.query(
-        `
-        SELECT
-            m.id,
-            m.external_id,
-            m.match_date,
-            m.home_team_id,
-            m.away_team_id,
-            m.home_score,
-            m.away_score,
-            m.halftime_home_score,
-            m.halftime_away_score,
-            m.status,
-            m.venue,
+  This keeps all provider logic in matches.js instead of
+  duplicating API-Football and TheSportsDB code here.
+*/
+async function triggerH2HImport(team1, team2) {
+  const url =
+    `${INTERNAL_BACKEND_URL}/api/matches/import-h2h/` +
+    `${encodeURIComponent(team1)}/${encodeURIComponent(team2)}`;
 
-            home_team.name AS home_team,
-            away_team.name AS away_team,
+  console.log(
+    `H2H data missing. Triggering import for ${team1} vs ${team2}`
+  );
 
-            c.name AS competition,
-            c.slug AS competition_slug,
+  const response = await fetch(url, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+  });
 
-            s.name AS season
-        FROM matches m
+  let data = null;
 
-        JOIN teams home_team
-            ON home_team.id = m.home_team_id
+  try {
+    data = await response.json();
+  } catch {
+    data = null;
+  }
 
-        JOIN teams away_team
-            ON away_team.id = m.away_team_id
+  if (!response.ok) {
+    const message =
+      data?.message ||
+      `H2H import failed with status ${response.status}`;
 
-        JOIN competitions c
-            ON c.id = m.competition_id
+    throw new Error(message);
+  }
 
-        JOIN seasons s
-            ON s.id = m.season_id
+  console.log(
+    `H2H import completed for ${team1} vs ${team2}`
+  );
 
-        WHERE
-            (
-                (
-                    m.home_team_id = $1
-                    AND m.away_team_id = $2
-                )
-                OR
-                (
-                    m.home_team_id = $2
-                    AND m.away_team_id = $1
-                )
-            )
+  return data;
+}
 
-            AND m.status = 'finished'
+/*
+  Make sure H2H data exists before querying it.
 
-            AND m.home_score IS NOT NULL
-            AND m.away_score IS NOT NULL
+  Important behavior:
 
-        ORDER BY m.match_date DESC
-        `,
-        [team1.id, team2.id]
-      );
+  1. If both teams exist and H2H matches already exist:
+     - Do NOT call provider APIs.
+     - Use the existing database data.
 
-      const matches = matchesResult.rows;
+  2. If one/both teams are missing:
+     - Trigger the importer.
+     - The importer resolves the teams through the providers.
 
-      /*
-       * ==========================================
-       * TEAM 1 AT HOME
-       * ==========================================
-       */
+  3. If both teams exist but no H2H matches exist:
+     - Trigger the importer.
 
-      const team1HomeMatches =
-        matches.filter(
-          (match) =>
-            match.home_team_id === team1.id
-        );
+  4. After importing, resolve the teams again because the importer
+     may have created them dynamically.
+*/
+async function ensureH2HData(team1Identifier, team2Identifier) {
+  let [team1Data, team2Data] = await Promise.all([
+    findTeam(team1Identifier),
+    findTeam(team2Identifier),
+  ]);
 
-      let team1HomeWins = 0;
-      let team1HomeDraws = 0;
-      let team2AwayWins = 0;
+  /*
+    If both teams already exist, first check whether their H2H
+    data is already stored.
+  */
+  if (team1Data && team2Data) {
+    if (team1Data.id === team2Data.id) {
+      throw new Error("H2H requires two different teams");
+    }
 
-      let team1HomeGoals = 0;
-      let team2AwayGoals = 0;
+    const exists = await hasH2HData(
+      team1Data.id,
+      team2Data.id
+    );
 
-      let team1HomeCleanSheets = 0;
-      let team2AwayCleanSheets = 0;
-
-      team1HomeMatches.forEach(
-        (match) => {
-          team1HomeGoals +=
-            match.home_score;
-
-          team2AwayGoals +=
-            match.away_score;
-
-          /*
-           * Result
-           */
-          if (
-            match.home_score >
-            match.away_score
-          ) {
-            team1HomeWins++;
-          } else if (
-            match.home_score ===
-            match.away_score
-          ) {
-            team1HomeDraws++;
-          } else {
-            team2AwayWins++;
-          }
-
-          /*
-           * Clean sheets
-           */
-          if (match.away_score === 0) {
-            team1HomeCleanSheets++;
-          }
-
-          if (match.home_score === 0) {
-            team2AwayCleanSheets++;
-          }
-        }
-      );
-
-      /*
-       * ==========================================
-       * TEAM 2 AT HOME
-       * ==========================================
-       */
-
-      const team2HomeMatches =
-        matches.filter(
-          (match) =>
-            match.home_team_id === team2.id
-        );
-
-      let team2HomeWins = 0;
-      let team2HomeDraws = 0;
-      let team1AwayWins = 0;
-
-      let team2HomeGoals = 0;
-      let team1AwayGoals = 0;
-
-      let team2HomeCleanSheets = 0;
-      let team1AwayCleanSheets = 0;
-
-      team2HomeMatches.forEach(
-        (match) => {
-          team2HomeGoals +=
-            match.home_score;
-
-          team1AwayGoals +=
-            match.away_score;
-
-          /*
-           * Result
-           */
-          if (
-            match.home_score >
-            match.away_score
-          ) {
-            team2HomeWins++;
-          } else if (
-            match.home_score ===
-            match.away_score
-          ) {
-            team2HomeDraws++;
-          } else {
-            team1AwayWins++;
-          }
-
-          /*
-           * Clean sheets
-           */
-          if (match.away_score === 0) {
-            team2HomeCleanSheets++;
-          }
-
-          if (match.home_score === 0) {
-            team1AwayCleanSheets++;
-          }
-        }
-      );
-
-      /*
-       * ==========================================
-       * RESPONSE
-       * ==========================================
-       */
-
-      res.json({
-        status: "success",
-
-        teams: {
-          team1,
-          team2,
-        },
-
-        team1Home: {
-          meetings:
-            team1HomeMatches.length,
-
-          team1Wins:
-            team1HomeWins,
-
-          draws:
-            team1HomeDraws,
-
-          team2Wins:
-            team2AwayWins,
-
-          goals: {
-            team1:
-              team1HomeGoals,
-
-            team2:
-              team2AwayGoals,
-
-            total:
-              team1HomeGoals +
-              team2AwayGoals,
-
-            average:
-              team1HomeMatches.length > 0
-                ? Number(
-                    (
-                      (team1HomeGoals +
-                        team2AwayGoals) /
-                      team1HomeMatches.length
-                    ).toFixed(2)
-                  )
-                : 0,
-          },
-
-          cleanSheets: {
-            team1:
-              team1HomeCleanSheets,
-
-            team2:
-              team2AwayCleanSheets,
-          },
-
-          matches:
-            team1HomeMatches,
-        },
-
-        team2Home: {
-          meetings:
-            team2HomeMatches.length,
-
-          team2Wins:
-            team2HomeWins,
-
-          draws:
-            team2HomeDraws,
-
-          team1Wins:
-            team1AwayWins,
-
-          goals: {
-            team1:
-              team1AwayGoals,
-
-            team2:
-              team2HomeGoals,
-
-            total:
-              team1AwayGoals +
-              team2HomeGoals,
-
-            average:
-              team2HomeMatches.length > 0
-                ? Number(
-                    (
-                      (team1AwayGoals +
-                        team2HomeGoals) /
-                      team2HomeMatches.length
-                    ).toFixed(2)
-                  )
-                : 0,
-          },
-
-          cleanSheets: {
-            team1:
-              team1AwayCleanSheets,
-
-            team2:
-              team2HomeCleanSheets,
-          },
-
-          matches:
-            team2HomeMatches,
-        },
-      });
-    } catch (error) {
-      console.error(
-        "Home-away H2H query failed:",
-        error.message
-      );
-
-      res.status(500).json({
-        status: "error",
-        message:
-          "Failed to retrieve home-away H2H data",
-      });
+    if (exists) {
+      return {
+        team1Data,
+        team2Data,
+        imported: false,
+      };
     }
   }
-);
+
+  /*
+    Data is missing, so use the existing importer.
+  */
+  await triggerH2HImport(
+    team1Identifier,
+    team2Identifier
+  );
+
+  /*
+    Resolve the teams again because the importer can create
+    new canonical teams dynamically.
+  */
+  [team1Data, team2Data] = await Promise.all([
+    findTeam(team1Identifier),
+    findTeam(team2Identifier),
+  ]);
+
+  return {
+    team1Data,
+    team2Data,
+    imported: true,
+  };
+}
 
 /*
- * ==========================================
- * GENERAL H2H
- * ==========================================
- */
+  GET
+  /api/h2h/:team1/:team2
 
+  Returns:
+  - Team information
+  - H2H summary
+  - Goal statistics
+  - Goal markets
+  - Clean sheets
+  - Previous meetings
+
+  NEW BEHAVIOR:
+  If H2H data is not already stored, the existing importer
+  is triggered automatically.
+*/
+router.get("/:team1/:team2", async (req, res) => {
+  const { team1, team2 } = req.params;
+
+  try {
+    const ensured = await ensureH2HData(team1, team2);
+
+    const team1Data = ensured.team1Data;
+    const team2Data = ensured.team2Data;
+
+    if (!team1Data) {
+      return res.status(404).json({
+        status: "error",
+        message: `Team not found: ${team1}`,
+      });
+    }
+
+    if (!team2Data) {
+      return res.status(404).json({
+        status: "error",
+        message: `Team not found: ${team2}`,
+      });
+    }
+
+    if (team1Data.id === team2Data.id) {
+      return res.status(400).json({
+        status: "error",
+        message: "H2H requires two different teams",
+      });
+    }
+
+    const limit = Math.min(
+      Math.max(Number(req.query.limit) || 50, 1),
+      50
+    );
+
+    const competitionId = req.query.competition
+      ? Number(req.query.competition)
+      : null;
+
+    const seasonId = req.query.season
+      ? Number(req.query.season)
+      : null;
+
+    const matchesResult = await pool.query(
+      `
+      SELECT
+        m.id,
+        m.match_date,
+        m.home_score,
+        m.away_score,
+        m.status,
+        m.venue,
+        m.provider,
+
+        home.id AS home_team_id,
+        home.name AS home_team_name,
+        home.slug AS home_team_slug,
+
+        away.id AS away_team_id,
+        away.name AS away_team_name,
+        away.slug AS away_team_slug,
+
+        c.id AS competition_id,
+        c.name AS competition_name,
+
+        s.id AS season_id,
+        s.name AS season_name
+
+      FROM matches m
+
+      JOIN teams home
+        ON home.id = m.home_team_id
+
+      JOIN teams away
+        ON away.id = m.away_team_id
+
+      LEFT JOIN competitions c
+        ON c.id = m.competition_id
+
+      LEFT JOIN seasons s
+        ON s.id = m.season_id
+
+      WHERE
+        (
+          (m.home_team_id = $1 AND m.away_team_id = $2)
+          OR
+          (m.home_team_id = $2 AND m.away_team_id = $1)
+        )
+        AND m.status = 'finished'
+        AND m.home_score IS NOT NULL
+        AND m.away_score IS NOT NULL
+        AND ($3::integer IS NULL OR m.competition_id = $3)
+        AND ($4::integer IS NULL OR m.season_id = $4)
+
+      ORDER BY m.match_date DESC
+
+      LIMIT $5
+      `,
+      [
+        team1Data.id,
+        team2Data.id,
+        competitionId,
+        seasonId,
+        limit,
+      ]
+    );
+
+    const matches = matchesResult.rows;
+
+    let team1Wins = 0;
+    let team2Wins = 0;
+    let draws = 0;
+
+    let team1Goals = 0;
+    let team2Goals = 0;
+
+    let btts = 0;
+
+    let over05 = 0;
+    let over15 = 0;
+    let over25 = 0;
+    let over35 = 0;
+    let over45 = 0;
+
+    let team1CleanSheets = 0;
+    let team2CleanSheets = 0;
+
+    let highestScoringMeeting = null;
+
+    for (const match of matches) {
+      const homeScore = Number(match.home_score);
+      const awayScore = Number(match.away_score);
+
+      const totalGoals = homeScore + awayScore;
+
+      const team1IsHome =
+        match.home_team_id === team1Data.id;
+
+      const team1Score = team1IsHome
+        ? homeScore
+        : awayScore;
+
+      const team2Score = team1IsHome
+        ? awayScore
+        : homeScore;
+
+      team1Goals += team1Score;
+      team2Goals += team2Score;
+
+      if (team1Score > team2Score) {
+        team1Wins++;
+      } else if (team2Score > team1Score) {
+        team2Wins++;
+      } else {
+        draws++;
+      }
+
+      if (
+        team1Score > 0 &&
+        team2Score > 0
+      ) {
+        btts++;
+      }
+
+      if (totalGoals > 0) {
+        over05++;
+      }
+
+      if (totalGoals > 1) {
+        over15++;
+      }
+
+      if (totalGoals > 2) {
+        over25++;
+      }
+
+      if (totalGoals > 3) {
+        over35++;
+      }
+
+      if (totalGoals > 4) {
+        over45++;
+      }
+
+      if (team1Score === 0) {
+        team2CleanSheets++;
+      }
+
+      if (team2Score === 0) {
+        team1CleanSheets++;
+      }
+
+      if (
+        !highestScoringMeeting ||
+        totalGoals >
+          highestScoringMeeting.totalGoals
+      ) {
+        highestScoringMeeting = {
+          matchId: match.id,
+          date: match.match_date,
+          totalGoals,
+          team1Score,
+          team2Score,
+          homeTeam: match.home_team_name,
+          awayTeam: match.away_team_name,
+        };
+      }
+    }
+
+    const totalMatches = matches.length;
+
+    const totalGoals =
+      team1Goals + team2Goals;
+
+    const averageGoals =
+      totalMatches > 0
+        ? Number(
+            (
+              totalGoals / totalMatches
+            ).toFixed(2)
+          )
+        : 0;
+
+    const team1WinPercentage =
+      totalMatches > 0
+        ? Number(
+            (
+              (team1Wins / totalMatches) *
+              100
+            ).toFixed(1)
+          )
+        : 0;
+
+    const team2WinPercentage =
+      totalMatches > 0
+        ? Number(
+            (
+              (team2Wins / totalMatches) *
+              100
+            ).toFixed(1)
+          )
+        : 0;
+
+    const drawPercentage =
+      totalMatches > 0
+        ? Number(
+            (
+              (draws / totalMatches) *
+              100
+            ).toFixed(1)
+          )
+        : 0;
+
+    res.json({
+      status: "success",
+
+      teams: {
+        team1: team1Data,
+        team2: team2Data,
+      },
+
+      filters: {
+        competition: competitionId,
+        season: seasonId,
+        limit,
+      },
+
+      summary: {
+        totalMatches,
+
+        team1Wins,
+        team2Wins,
+        draws,
+
+        team1WinPercentage,
+        team2WinPercentage,
+        drawPercentage,
+
+        team1Goals,
+        team2Goals,
+
+        totalGoals,
+
+        goalDifference:
+          team1Goals - team2Goals,
+
+        averageGoals,
+
+        btts,
+
+        bttsPercentage:
+          totalMatches > 0
+            ? Number(
+                (
+                  (btts / totalMatches) *
+                  100
+                ).toFixed(1)
+              )
+            : 0,
+
+        over05,
+        over15,
+        over25,
+        over35,
+        over45,
+
+        team1CleanSheets,
+        team2CleanSheets,
+
+        highestScoringMeeting,
+      },
+
+      matches,
+    });
+  } catch (error) {
+    console.error(
+      "GET /api/h2h/:team1/:team2 error:",
+      error
+    );
+
+    res.status(500).json({
+      status: "error",
+      message:
+        error.message ||
+        "Failed to load H2H data",
+    });
+  }
+});
+
+/*
+  GET
+  /api/h2h/:team1/:team2/home-away
+
+  Returns home/away breakdown for the two teams.
+
+  This route also uses ensureH2HData(), so a new matchup
+  can populate itself automatically.
+*/
 router.get(
-  "/:team1Slug/:team2Slug",
+  "/:team1/:team2/home-away",
   async (req, res) => {
-    const {
-      team1Slug,
-      team2Slug,
-    } = req.params;
-
-    const {
-      limit = 10,
-      competition,
-      season,
-    } = req.query;
+    const { team1, team2 } = req.params;
 
     try {
-      /*
-       * Validate limit
-       */
-      const parsedLimit =
-        Math.min(
-          Math.max(
-            parseInt(limit, 10) || 10,
-            1
-          ),
-          50
-        );
-
-      /*
-       * Find teams
-       */
-      const teamsResult = await pool.query(
-        `
-        SELECT
-            id,
-            external_id,
-            name,
-            short_name,
-            country,
-            logo_url,
-            slug
-        FROM teams
-        WHERE slug IN ($1, $2)
-        `,
-        [team1Slug, team2Slug]
+      const ensured = await ensureH2HData(
+        team1,
+        team2
       );
 
-      if (teamsResult.rows.length !== 2) {
+      const team1Data = ensured.team1Data;
+      const team2Data = ensured.team2Data;
+
+      if (!team1Data || !team2Data) {
         return res.status(404).json({
           status: "error",
           message: "One or both teams not found",
         });
       }
 
-      const team1 = teamsResult.rows.find(
-        (team) => team.slug === team1Slug
-      );
-
-      const team2 = teamsResult.rows.find(
-        (team) => team.slug === team2Slug
-      );
-
-      /*
-       * Build dynamic filters
-       */
-      const queryParams = [
-        team1.id,
-        team2.id,
-      ];
-
-      let paramIndex = 3;
-
-      let additionalFilters = "";
-
-      if (competition) {
-        additionalFilters += `
-          AND c.slug = $${paramIndex}
-        `;
-
-        queryParams.push(competition);
-
-        paramIndex++;
+      if (team1Data.id === team2Data.id) {
+        return res.status(400).json({
+          status: "error",
+          message: "H2H requires two different teams",
+        });
       }
 
-      if (season) {
-        additionalFilters += `
-          AND s.name = $${paramIndex}
-        `;
-
-        queryParams.push(season);
-
-        paramIndex++;
-      }
-
-      /*
-       * Get H2H matches
-       */
-      const matchesResult = await pool.query(
+      const result = await pool.query(
         `
         SELECT
-            m.id,
-            m.external_id,
-            m.match_date,
+          m.id,
+          m.match_date,
+          m.home_score,
+          m.away_score,
 
-            m.home_team_id,
-            m.away_team_id,
+          m.home_team_id,
+          m.away_team_id,
 
-            m.home_score,
-            m.away_score,
-
-            m.halftime_home_score,
-            m.halftime_away_score,
-
-            m.status,
-            m.venue,
-
-            home_team.name AS home_team,
-            away_team.name AS away_team,
-
-            c.name AS competition,
-            c.slug AS competition_slug,
-
-            s.name AS season
+          home.name AS home_team_name,
+          away.name AS away_team_name
 
         FROM matches m
 
-        JOIN teams home_team
-            ON home_team.id = m.home_team_id
+        JOIN teams home
+          ON home.id = m.home_team_id
 
-        JOIN teams away_team
-            ON away_team.id = m.away_team_id
-
-        JOIN competitions c
-            ON c.id = m.competition_id
-
-        JOIN seasons s
-            ON s.id = m.season_id
+        JOIN teams away
+          ON away.id = m.away_team_id
 
         WHERE
+          (
             (
-                (
-                    m.home_team_id = $1
-                    AND m.away_team_id = $2
-                )
-                OR
-                (
-                    m.home_team_id = $2
-                    AND m.away_team_id = $1
-                )
+              m.home_team_id = $1
+              AND m.away_team_id = $2
             )
-
-            AND m.status = 'finished'
-
-            AND m.home_score IS NOT NULL
-            AND m.away_score IS NOT NULL
-
-            ${additionalFilters}
+            OR
+            (
+              m.home_team_id = $2
+              AND m.away_team_id = $1
+            )
+          )
+          AND m.status = 'finished'
+          AND m.home_score IS NOT NULL
+          AND m.away_score IS NOT NULL
 
         ORDER BY m.match_date DESC
-
-        LIMIT $${paramIndex}
         `,
         [
-          ...queryParams,
-          parsedLimit,
+          team1Data.id,
+          team2Data.id,
         ]
       );
 
-      const matches =
-        matchesResult.rows;
+      const breakdown = {
+        team1: {
+          home: {
+            played: 0,
+            wins: 0,
+            draws: 0,
+            losses: 0,
+            goalsFor: 0,
+            goalsAgainst: 0,
+          },
 
-      /*
-       * ==========================================
-       * CALCULATE H2H RECORD
-       * ==========================================
-       */
+          away: {
+            played: 0,
+            wins: 0,
+            draws: 0,
+            losses: 0,
+            goalsFor: 0,
+            goalsAgainst: 0,
+          },
+        },
 
-      let team1Wins = 0;
-      let team2Wins = 0;
-      let draws = 0;
+        team2: {
+          home: {
+            played: 0,
+            wins: 0,
+            draws: 0,
+            losses: 0,
+            goalsFor: 0,
+            goalsAgainst: 0,
+          },
 
-      let team1Goals = 0;
-      let team2Goals = 0;
+          away: {
+            played: 0,
+            wins: 0,
+            draws: 0,
+            losses: 0,
+            goalsFor: 0,
+            goalsAgainst: 0,
+          },
+        },
+      };
 
-      let bttsYes = 0;
-      let bttsNo = 0;
+      for (const match of result.rows) {
+        const homeScore = Number(
+          match.home_score
+        );
 
-      let over05 = 0;
-      let over15 = 0;
-      let over25 = 0;
-      let over35 = 0;
-      let over45 = 0;
+        const awayScore = Number(
+          match.away_score
+        );
 
-      let team1CleanSheets = 0;
-      let team2CleanSheets = 0;
+        const team1IsHome =
+          match.home_team_id === team1Data.id;
 
-      matches.forEach(
-        (match) => {
-          const isTeam1Home =
-            match.home_team_id ===
-            team1.id;
+        const team1Side =
+          team1IsHome ? "home" : "away";
 
-          const team1Score =
-            isTeam1Home
-              ? match.home_score
-              : match.away_score;
+        const team2Side =
+          team1IsHome ? "away" : "home";
 
-          const team2Score =
-            isTeam1Home
-              ? match.away_score
-              : match.home_score;
+        const team1Stats =
+          breakdown.team1[team1Side];
 
-          /*
-           * Wins / draws
-           */
-          if (
-            team1Score >
-            team2Score
-          ) {
-            team1Wins++;
-          } else if (
-            team1Score <
-            team2Score
-          ) {
-            team2Wins++;
+        const team2Stats =
+          breakdown.team2[team2Side];
+
+        team1Stats.played++;
+        team2Stats.played++;
+
+        if (team1IsHome) {
+          team1Stats.goalsFor += homeScore;
+          team1Stats.goalsAgainst += awayScore;
+
+          team2Stats.goalsFor += awayScore;
+          team2Stats.goalsAgainst += homeScore;
+
+          if (homeScore > awayScore) {
+            team1Stats.wins++;
+            team2Stats.losses++;
+          } else if (homeScore < awayScore) {
+            team1Stats.losses++;
+            team2Stats.wins++;
           } else {
-            draws++;
+            team1Stats.draws++;
+            team2Stats.draws++;
           }
+        } else {
+          team1Stats.goalsFor += awayScore;
+          team1Stats.goalsAgainst += homeScore;
 
-          /*
-           * Goals
-           */
-          team1Goals +=
-            team1Score;
+          team2Stats.goalsFor += homeScore;
+          team2Stats.goalsAgainst += awayScore;
 
-          team2Goals +=
-            team2Score;
-
-          const totalGoals =
-            team1Score +
-            team2Score;
-
-          /*
-           * BTTS
-           */
-          if (
-            team1Score > 0 &&
-            team2Score > 0
-          ) {
-            bttsYes++;
+          if (awayScore > homeScore) {
+            team1Stats.wins++;
+            team2Stats.losses++;
+          } else if (awayScore < homeScore) {
+            team1Stats.losses++;
+            team2Stats.wins++;
           } else {
-            bttsNo++;
-          }
-
-          /*
-           * Over goals
-           */
-          if (totalGoals > 0.5) {
-            over05++;
-          }
-
-          if (totalGoals > 1.5) {
-            over15++;
-          }
-
-          if (totalGoals > 2.5) {
-            over25++;
-          }
-
-          if (totalGoals > 3.5) {
-            over35++;
-          }
-
-          if (totalGoals > 4.5) {
-            over45++;
-          }
-
-          /*
-           * Clean sheets
-           */
-          if (team2Score === 0) {
-            team1CleanSheets++;
-          }
-
-          if (team1Score === 0) {
-            team2CleanSheets++;
+            team1Stats.draws++;
+            team2Stats.draws++;
           }
         }
-      );
+      }
 
-      /*
-       * Calculate average goals
-       */
-      const totalGoals =
-        team1Goals +
-        team2Goals;
-
-      const averageGoals =
-        matches.length > 0
-          ? Number(
-              (
-                totalGoals /
-                matches.length
-              ).toFixed(2)
-            )
-          : 0;
-
-      /*
-       * BTTS percentage
-       */
-      const bttsPercentage =
-        matches.length > 0
-          ? Number(
-              (
-                (bttsYes /
-                  matches.length) *
-                100
-              ).toFixed(1)
-            )
-          : 0;
-
-      /*
-       * Response
-       */
       res.json({
         status: "success",
 
-        filters: {
-          limit: parsedLimit,
-          competition:
-            competition || null,
-          season:
-            season || null,
-        },
-
         teams: {
-          team1,
-          team2,
+          team1: team1Data,
+          team2: team2Data,
         },
 
-        record: {
-          meetings:
-            matches.length,
-
-          team1Wins,
-
-          team2Wins,
-
-          draws,
-        },
-
-        goals: {
-          team1:
-            team1Goals,
-
-          team2:
-            team2Goals,
-
-          total:
-            totalGoals,
-
-          average:
-            averageGoals,
-        },
-
-        btts: {
-          yes:
-            bttsYes,
-
-          no:
-            bttsNo,
-
-          percentage:
-            bttsPercentage,
-        },
-
-        overGoals: {
-          over05,
-          over15,
-          over25,
-          over35,
-          over45,
-        },
-
-        cleanSheets: {
-          team1:
-            team1CleanSheets,
-
-          team2:
-            team2CleanSheets,
-        },
-
-        matches,
+        breakdown,
       });
     } catch (error) {
       console.error(
-        "H2H query failed:",
-        error.message
+        "GET /api/h2h/:team1/:team2/home-away error:",
+        error
       );
 
       res.status(500).json({
         status: "error",
         message:
-          "Failed to retrieve H2H data",
+          error.message ||
+          "Failed to load home/away H2H data",
       });
     }
   }
